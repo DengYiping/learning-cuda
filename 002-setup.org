@@ -1,0 +1,2 @@
+* Setup
+Just use the CUDA docker images

@@ -1,0 +1,86 @@
+* The current Deep Learning Ecosystem
+
+Probably this is going to be irrelevant in a few years.
+
+** Research
+*** PyTorch
+**** This is the primary tool researchers are using (except in Google).
+**** Users prefer pytorch because the graph is dynanmic
+**** Has a good interaction with Huggingface's ~transformers~ library
+*** Tensorflow
+**** Old most popular framework
+*** JAX
+**** JIT-compiled Autograd Xccelerated Linear Algebra
+*** MLX
+*** PyTorch Lightning
+*** Huggingface's ~transformers~
+** Production
+*** Inference
+**** vLLM
+**** TensorRT
+***** There is also ~TensorRT-LLM~, commonly used for LLM inference (supposed to be the fastest framework out there)
+**** SGLang
+*** Triton
+**** Developed by OpenAI, merged into PyTorch now. This is now part of PyTorch
+**** Trition: An Intermediate Language and Compiler for Tiled Neural Network Computation
+***** Tiling: breaking big problem into smaller pieces (tiles) and solve them
+*** ~torch.compile(...)~: just speed up things 30% in production
+**** Compile model into static representations
+**** Doing things like kernel fusion
+*** TorchScript
+**** If deployed in C++, it can be really fast
+*** ONNX Runtime
+**** ONNX is a file format for storing model weights & structure
+**** ONNX Runtime is the one that can be deployed & serving the model
+** Low-Level
+*** CUDA
+**** Compute unified device architecture (CUDA) can be thought of as a programming language for nvidia gpus.
+**** CUDA libs ⇒ cuDNN, cuBLAS, cutlass (fast linear algebra and DL algorithms). cuFFT for fast convolutions (FFTs are covered in the course)
+**** writing the kernel yourself based on the hardware architecture (Nvidia still does this under the hood for by passing in special flags to the compiler)
+*** ROCm
+**** CUDA for AMD
+*** OpenCL
+**** Open computing language
+**** Often has cost for performance, only useful for embedded sytem
+** Inference for Edge Computing & Embedded Systems
+*** CoreML
+**** Used for Apple device deployment
+**** PyTorch Mobile
+**** TensorFlow Lite
+** Easy to use tool
+*** FastAI
+*** ONNX
+*** wandb
+** Cloud Providers
+*** AWS
+**** EC2 / S3
+**** Sagemaker for ML
+*** Google cloud
+**** Vertex AI
+**** VM instances
+*** Microsfot Azure
+**** Deepspeed
+*** OpenAI
+**** It has its own fine-tuning service
+*** VastAI
+**** Rent GPU
+*** Lambda Labs
+**** Cheap DC GPUs
+** Compilers
+*** XLA
+**** A domain-specific compiler for linear algebra that optimizes TensorFlow computations
+**** Provides a lower-level optimization and code generation backend for JAX
+**** Performs whole-program optimization, seeing beyond individual operations to optimize across the entire computation graph
+**** Enables efficient execution on various hardware (CPUs, GPUs, TPUs) by generating optimized machine code
+*** LLVM
+*** MLIR
+**** Mojo is built on MLIR
+*** NVCC
+
+#+CAPTION: CUDA compilation proces
+#+NAME:  fig:cuda-compilation
+[[./assets/cuda-compilation-from-cu-to-executable.png]]
+
+**** Nvidia CUDA Compiler
+**** Works on everything in the CUDA toolkit
+
