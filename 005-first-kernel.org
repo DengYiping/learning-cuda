@@ -538,4 +538,17 @@ Nvidia tool extension to add more context for the program
   - ~ncu --set~ is the most useful command. It sets profiling mode.
   - ~ncu --list-sets~ list the set we can use
 
+* Atomics
+By “atomic” we are referring to the indivisibility concept in physics where a thing cannot be broken down further.
+
+An atomic operation ensures that a particular operation on a memory location is completed entirely by one thread
+before another thread can access or modify the same memory location. This prevents race conditions.
+
+Since we limit the amount of work done on a single piece of memory per unit time throughout an atomic operation,
+we lose slightly to speed. It is hardware guaranteed to be memory safe at a cost of speed.
+
+** Integer Atomic Operations
+
+
+
 
