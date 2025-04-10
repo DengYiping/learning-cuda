@@ -1,0 +1,541 @@
+* Writing first kernel in CUDA
+
+First, let's print out the device query. We can do so by compiling the ~cuda_samples~ repo.
+
+#+begin_src bash
+  jovyan@na1-glad-hefty-peacock:~/cuda-samples/build/Samples/1_Utilities/deviceQuery$ ./deviceQuery
+./deviceQuery Starting...
+
+ CUDA Device Query (Runtime API) version (CUDART static linking)
+
+Detected 8 CUDA Capable device(s)
+
+Device 0: "NVIDIA H100 80GB HBM3"
+  CUDA Driver Version / Runtime Version          12.8 / 12.8
+  CUDA Capability Major/Minor version number:    9.0
+  Total amount of global memory:                 81090 MBytes (85029158912 bytes)
+  (132) Multiprocessors, (128) CUDA Cores/MP:    16896 CUDA Cores
+  GPU Max Clock rate:                            1980 MHz (1.98 GHz)
+  Memory Clock rate:                             2619 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 52428800 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total shared memory per multiprocessor:        233472 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Managed Memory:                Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 83 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+
+Device 1: "NVIDIA H100 80GB HBM3"
+  CUDA Driver Version / Runtime Version          12.8 / 12.8
+  CUDA Capability Major/Minor version number:    9.0
+  Total amount of global memory:                 81090 MBytes (85029158912 bytes)
+  (132) Multiprocessors, (128) CUDA Cores/MP:    16896 CUDA Cores
+  GPU Max Clock rate:                            1980 MHz (1.98 GHz)
+  Memory Clock rate:                             2619 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 52428800 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total shared memory per multiprocessor:        233472 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Managed Memory:                Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 100 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+
+Device 2: "NVIDIA H100 80GB HBM3"
+  CUDA Driver Version / Runtime Version          12.8 / 12.8
+  CUDA Capability Major/Minor version number:    9.0
+  Total amount of global memory:                 81090 MBytes (85029158912 bytes)
+  (132) Multiprocessors, (128) CUDA Cores/MP:    16896 CUDA Cores
+  GPU Max Clock rate:                            1980 MHz (1.98 GHz)
+  Memory Clock rate:                             2619 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 52428800 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total shared memory per multiprocessor:        233472 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Managed Memory:                Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 117 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+
+Device 3: "NVIDIA H100 80GB HBM3"
+  CUDA Driver Version / Runtime Version          12.8 / 12.8
+  CUDA Capability Major/Minor version number:    9.0
+  Total amount of global memory:                 81090 MBytes (85029158912 bytes)
+  (132) Multiprocessors, (128) CUDA Cores/MP:    16896 CUDA Cores
+  GPU Max Clock rate:                            1980 MHz (1.98 GHz)
+  Memory Clock rate:                             2619 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 52428800 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total shared memory per multiprocessor:        233472 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Managed Memory:                Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 134 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+
+Device 4: "NVIDIA H100 80GB HBM3"
+  CUDA Driver Version / Runtime Version          12.8 / 12.8
+  CUDA Capability Major/Minor version number:    9.0
+  Total amount of global memory:                 81090 MBytes (85029158912 bytes)
+  (132) Multiprocessors, (128) CUDA Cores/MP:    16896 CUDA Cores
+  GPU Max Clock rate:                            1980 MHz (1.98 GHz)
+  Memory Clock rate:                             2619 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 52428800 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total shared memory per multiprocessor:        233472 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Managed Memory:                Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 151 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+
+Device 5: "NVIDIA H100 80GB HBM3"
+  CUDA Driver Version / Runtime Version          12.8 / 12.8
+  CUDA Capability Major/Minor version number:    9.0
+  Total amount of global memory:                 81090 MBytes (85029158912 bytes)
+  (132) Multiprocessors, (128) CUDA Cores/MP:    16896 CUDA Cores
+  GPU Max Clock rate:                            1980 MHz (1.98 GHz)
+  Memory Clock rate:                             2619 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 52428800 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total shared memory per multiprocessor:        233472 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Managed Memory:                Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 168 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+
+Device 6: "NVIDIA H100 80GB HBM3"
+  CUDA Driver Version / Runtime Version          12.8 / 12.8
+  CUDA Capability Major/Minor version number:    9.0
+  Total amount of global memory:                 81090 MBytes (85029158912 bytes)
+  (132) Multiprocessors, (128) CUDA Cores/MP:    16896 CUDA Cores
+  GPU Max Clock rate:                            1980 MHz (1.98 GHz)
+  Memory Clock rate:                             2619 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 52428800 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total shared memory per multiprocessor:        233472 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Managed Memory:                Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 185 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+
+Device 7: "NVIDIA H100 80GB HBM3"
+  CUDA Driver Version / Runtime Version          12.8 / 12.8
+  CUDA Capability Major/Minor version number:    9.0
+  Total amount of global memory:                 81090 MBytes (85029158912 bytes)
+  (132) Multiprocessors, (128) CUDA Cores/MP:    16896 CUDA Cores
+  GPU Max Clock rate:                            1980 MHz (1.98 GHz)
+  Memory Clock rate:                             2619 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 52428800 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total shared memory per multiprocessor:        233472 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Managed Memory:                Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 202 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+> Peer access from NVIDIA H100 80GB HBM3 (GPU0) -> NVIDIA H100 80GB HBM3 (GPU1) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU0) -> NVIDIA H100 80GB HBM3 (GPU2) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU0) -> NVIDIA H100 80GB HBM3 (GPU3) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU0) -> NVIDIA H100 80GB HBM3 (GPU4) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU0) -> NVIDIA H100 80GB HBM3 (GPU5) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU0) -> NVIDIA H100 80GB HBM3 (GPU6) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU0) -> NVIDIA H100 80GB HBM3 (GPU7) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU1) -> NVIDIA H100 80GB HBM3 (GPU0) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU1) -> NVIDIA H100 80GB HBM3 (GPU2) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU1) -> NVIDIA H100 80GB HBM3 (GPU3) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU1) -> NVIDIA H100 80GB HBM3 (GPU4) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU1) -> NVIDIA H100 80GB HBM3 (GPU5) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU1) -> NVIDIA H100 80GB HBM3 (GPU6) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU1) -> NVIDIA H100 80GB HBM3 (GPU7) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU2) -> NVIDIA H100 80GB HBM3 (GPU0) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU2) -> NVIDIA H100 80GB HBM3 (GPU1) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU2) -> NVIDIA H100 80GB HBM3 (GPU3) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU2) -> NVIDIA H100 80GB HBM3 (GPU4) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU2) -> NVIDIA H100 80GB HBM3 (GPU5) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU2) -> NVIDIA H100 80GB HBM3 (GPU6) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU2) -> NVIDIA H100 80GB HBM3 (GPU7) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU3) -> NVIDIA H100 80GB HBM3 (GPU0) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU3) -> NVIDIA H100 80GB HBM3 (GPU1) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU3) -> NVIDIA H100 80GB HBM3 (GPU2) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU3) -> NVIDIA H100 80GB HBM3 (GPU4) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU3) -> NVIDIA H100 80GB HBM3 (GPU5) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU3) -> NVIDIA H100 80GB HBM3 (GPU6) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU3) -> NVIDIA H100 80GB HBM3 (GPU7) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU4) -> NVIDIA H100 80GB HBM3 (GPU0) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU4) -> NVIDIA H100 80GB HBM3 (GPU1) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU4) -> NVIDIA H100 80GB HBM3 (GPU2) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU4) -> NVIDIA H100 80GB HBM3 (GPU3) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU4) -> NVIDIA H100 80GB HBM3 (GPU5) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU4) -> NVIDIA H100 80GB HBM3 (GPU6) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU4) -> NVIDIA H100 80GB HBM3 (GPU7) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU5) -> NVIDIA H100 80GB HBM3 (GPU0) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU5) -> NVIDIA H100 80GB HBM3 (GPU1) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU5) -> NVIDIA H100 80GB HBM3 (GPU2) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU5) -> NVIDIA H100 80GB HBM3 (GPU3) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU5) -> NVIDIA H100 80GB HBM3 (GPU4) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU5) -> NVIDIA H100 80GB HBM3 (GPU6) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU5) -> NVIDIA H100 80GB HBM3 (GPU7) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU6) -> NVIDIA H100 80GB HBM3 (GPU0) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU6) -> NVIDIA H100 80GB HBM3 (GPU1) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU6) -> NVIDIA H100 80GB HBM3 (GPU2) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU6) -> NVIDIA H100 80GB HBM3 (GPU3) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU6) -> NVIDIA H100 80GB HBM3 (GPU4) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU6) -> NVIDIA H100 80GB HBM3 (GPU5) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU6) -> NVIDIA H100 80GB HBM3 (GPU7) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU7) -> NVIDIA H100 80GB HBM3 (GPU0) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU7) -> NVIDIA H100 80GB HBM3 (GPU1) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU7) -> NVIDIA H100 80GB HBM3 (GPU2) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU7) -> NVIDIA H100 80GB HBM3 (GPU3) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU7) -> NVIDIA H100 80GB HBM3 (GPU4) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU7) -> NVIDIA H100 80GB HBM3 (GPU5) : Yes
+> Peer access from NVIDIA H100 80GB HBM3 (GPU7) -> NVIDIA H100 80GB HBM3 (GPU6) : Yes
+
+deviceQuery, CUDA Driver = CUDART, CUDA Driver Version = 12.8, CUDA Runtime Version = 12.8, NumDevs = 8
+Result = PASS
+#+end_src
+
+The important bit here is the compute capability. We are given 9.0 as compute capability, which enable us to use feature like thread block clusters.
+
+** Typical workflow for CUDA program
+
+1. Then we need to copy the data to device (on the vRAM)
+2. Copy input from host to device
+3. Load GPU program and execute using the transferred on-device data
+4. Copy results from device back to host so you can display / use it somehow
+
+** Device VS Host naming scheme
+
+~h_A~ refers to host for variable name "A"
+
+~d_A~ refers to device for variable name "A"
+
+~__global__~ is visible globally, meaning that CPU or host can call these global functions.
+These typically don't return anything, but does operations on variables we passed in.
+
+~__device__~ is a very cool function that only the GPU can call. This is CUDA's version of calling a function in a library isntead
+of writing the function in your ~main.py~ file.
+
+~__host__~ is only going to run on CPU, same as running a regular C / C++ script on CPU without CUDA.
+
+** Memory management
+*** ~cudaMalloc~: memory allocation on vRAM
+
+#+begin_src c
+  float *d_a, *d_b, *d_c;
+  cudaMalloc(&d_a, N * N * sizeof(float));
+  cudaMalloc(&d_b, M * M * sizeof(float));
+  cudaMalloc(&d_c, K * K * sizeof(float));
+#+end_src
+
+*** ~cudaMemcpy~: memcpy for host to device, device to host or device to device
+- ~cudaMemcpyHostToDevice~
+- ~cudaMemcpyDeviceToHost~
+- ~cudaMemcpyDeviceToDevice~
+
+*** ~cudaFree~ will free memory on the device
+
+** ~nvcc~ compiler
+*** Host code
+**** modified to run kernels
+**** compiled to x86 binary
+*** Device code
+**** compiled to PTX (parallel thread execution)
+**** stable across multiple GPU generations
+*** JIT
+**** PTX into native GPU instructions
+**** allows for forward compatibilities
+
+** CUDA Hierarchy
+*** Kernel executes in a Thread
+*** Threads grouped into Thread Blocks
+*** Blocks grouped into a Grid
+*** Kernel executed as a Grid of Blocks of Threads
+
+** CUDA Hierarchy technical term
+*** ~gridDim~: number of blocks in a grid
+*** ~blockIdx~: index of the block in the grid
+*** ~blockDim~: number of threads in a block
+*** ~threadIdx~: index of the thread in the block
+
+** Threads
+*** Each thread has local memory (register) and it private to the thread
+*** If you want to add ~a = [1, 2, 3, ..., N]~ and ~b = [2, 4, 6, ..., N]~ each thread would do a single add
+**** Thread 0: ~a[0] + b[0]~
+**** Thread 1: ~a[1] + b[1]~
+**** Thread 2: ...
+*** On Hopper, there are 65,536 32-bit registers per SM
+*** 2048 threads can be run concurrently
+
+** Warp
+*** Each warp is inside of a block and parallelize 32 threads
+*** Instructions are issued to warps that then tell the threads what to do
+*** There is no way of getting around using warps
+*** Warp scheduler makes the warps run
+*** 64 concurrent warps per SM
+*** 4 warp schedulers per SM
+*** Total 256KiB of registers per SM
+
+** Blocks
+*** Each block has shared memory visible to all threads in a thread block
+*** Excutes the same code on different data, shared memory space, more efficient memory reads and writes since coordination is better
+*** 256KiB of combined L1 cache, texture cache and shared memory on H100 per SM
+*** 228KiB can be used as shared memory
+
+** Grids
+*** During kernel execution, the threads within the blocks within the grid can access global memory (VRAM)
+*** Contains a bunch of blocks
+*** CUDA parallelism is scalable because they aren't sequential blcok run-time dependencies.
+*** As long as all the pieces are assembled in the right place at the end, it works!
+
+* Programs
+** Indexing
+- CUDA requires us to first define the grid. Grid can be 1d, 2d or 3d.
+#+begin_src cuda
+  Dim3 numBlocks(block_x, block_y, block_z);
+#+end_src
+- Then we can define the threads inside blocks. Again, we can run threads in 1d, 2d or 3d.
+#+begin_src cuda
+  Dim3 threads_per_block(thread_x, thread_y, thread_z);
+#+end_src
+
+Inside the kernel, we can retrieve the index of block and thread, using ~blockIdx~ and ~threadIdx~.
+Also, ~gridDim~ contains the grid setup, and ~blockDim~ contains the block setup.
+** Vector add (elementwise add)
+This is just adding element 1 by 1. We can use a 1d grid and 1d block to do so.
+** Naive Matmul kernel
+This kernel is special. We will setup the grid and the block along the dimension of the final matrix, ~C~.
+
+* Launching kernel
+- Type ~dim3~ is 3D type for grids and thread blocks which are later feed into the kernel launch configuration.
+- allows for indexing of elements as vector, matrix, or volume (tensor)
+
+#+begin_src cuda
+  dim3 gridDim(4, 4, 1); // 4 blocks in x, 4 block in y, 1 block in z
+  dim3 blockDim(4, 2, 2); // 4 threads in x, 2 thread in y, 2 thread in z
+#+end_src
+
+The execution configuration (of a global function call) is specified by
+inserting an expression of the form ~<<<gridDim, blockDim, Ns, S>>>~, where:
+
+- Dg (dim3) specifies the dimension and size of the grid.
+- Db (dim3) specifies the dimension and size of each block
+- Ns (size_t) specifies the number of bytes in shared memory that is dynamically allocated per block for this call in addition to the statically allocated memory. (typically omitted)
+- S (cudaStream_t) specifies the associated stream, is an optional parameter which defaults to 0.
+
+* Synchronization
+CUDA has no guarantee that things will operate in order. Some threads might finish ahead, while others might
+finish late.
+
+There are 3 synchronization semantics we can use:
+** ~cudaDeviceSynchronize()~
+This is to wait for kernels to finish on device. Useful for CPU to wait for kernel completion.
+** ~__syncthreads()~
+Sync threads in a block.
+** ~__syncwarps()~
+Sync threads in a warp. Useful if warps are divergent (or specialized).
+
+* SIMD / SIMT (Single instruction multiple threads
+- Similar to CPU SIMD (single instruction multiple data), we have single instruction multiple thread on GPU.
+- Single instruction can issue to multiple threads to handle different pieces of data
+- Simpler than CPU
+  - in-order instruction issue
+  - no branch prediction
+  - significantly less control than CPU architecture gives us more room for more CORES
+
+* Math intrinsics
+- device-only hardware instructions for fundamental math operations
+- [[https://docs.nvidia.com/cuda/cuda-math-api/index.html]]
+- you can use host designed operations like ~log()~ (host) instead of ~logf()~ (device)
+- you can pass in ~-use_fast_math~ to the nvcc compiler to convert to these device only ops
+- ~--fmad=true~ for fused multiply-add
+
+* Profiling
+** ~nvtx~ Add context for application for profiling
+Nvidia tool extension to add more context for the program
+- Compile with ~-lnvToolsExt~
+- ~nsys profile --stats=true ./00~
+- ~ncu -o 04 --kernel-name d_matmul --launch-skip 0 --launch-count 1 --set pmsampling "./04_adding_profiling_nvtx"~
+  - ~ncu --set~ is the most useful command. It sets profiling mode.
+  - ~ncu --list-sets~ list the set we can use
+
+

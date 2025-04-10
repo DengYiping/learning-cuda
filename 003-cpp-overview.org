@@ -1,0 +1,40 @@
+* Overview of CPP
+** Write a hello world
+*** Compilation
+#+BEGIN_SRC bash
+  nvcc -o main main.cu
+#+END_SRC
+
+In GCC
+#+begin_src bash
+  gcc -o main main.c
+#+end_src
+
+In C++
+
+#+begin_src bash
+  g++ -o main main.c
+#+end_src
+
+In CUDA
+#+begin_src bash
+  nvcc -arch=sm_90 -o main main.cu
+#+end_src
+
+** Macros in C
+
+Conditional macros
+#+begin_src c
+  // #if
+  // #ifdef
+  // #ifndef
+  // #elif
+  // #else
+  // #endif
+  #define PI 3.1415926
+  #define AREA(r) (PI * r * r)
+  #ifndef radius
+  #define radius 7
+  #endif
+#+end_src
+

@@ -1,0 +1,56 @@
+* Introduction to GPU
+GPU stands for Graphic Processing Unit, and it extends beyond just graphic works
+** CPU
+- General purpose
+- High clock speed
+- Loads of caches
+- Low latency
+- Low throughput
+- Few cores
+** GPU
+- Specialized
+- Low clock speed
+- Many cores
+- Low caches
+- High latency
+- High throughput
+- For modern GPUs, high memory bandwidth (HBMs)
+- Still accessible for consumers
+** TPU / NPU
+- Specialized unit for deep learning (processing tensors)
+- Way more expensive
+** FPGA
+- Chips that you can program (at the gate level)
+- Allows modularity
+
+* History of GPUs
+- 1995: pre-GeForce
+- 1999: GeForce 256
+- 2006: Tesla
+- 2017: Volta -> this is when NVIDIA starts really speed up CUDA performance
+- 2022: Hopper -> Really fast
+- 2024: Blackwell -> SOTA
+
+** CPUs vs GPUs
+
+#+CAPTION: CPU vs GPU
+#+NAME:  fig:cpu-vs-gpu
+[[./assets/CPU vs GPU.png]]
+*** Hopper GPU (H100)
+- 118 SMs (Streaming multiprocessor)
+- Each SM with 4 warp, each warp with 32 threads = 128 threads per SM
+- This is 15104 threads in total. Each thread has its own register
+
+** Typical CUDA program
+1. Allocate memory on CPUs
+2. Copy from CPUs to GPUs
+3. CPU launches kernel (little function running on GPU) on GPU
+4. CPU copies results back from GPU memory (vRAM)
+** Terms to remember
+- Kernel (not Linux kernel, not convolution kernel, not popcorn, but GPU kernel)
+- threads, block, grid, SM, warp
+- GEMM (General Matrix Multiplication)
+- SGEMM (Single precision General Matrix Multiplication)
+- cpu/host/functions vs gpu/device/kernel
+- CPU is referred as host, it executes functions
+- GPU is referred as device, it executes kernel
