@@ -1,0 +1,80 @@
+* Faster matmul
+There is a great write up by an engineer at Anthropic:
+[[https://siboehm.com/articles/22/CUDA-MMM][blog post]] and [[https://github.com/siboehm/SGEMM_CUDA][Git repo]].
+
+** Naive implementation
+We launch a grid and threads along the matrix C. Basically
+- ~x_C = blockIdx.x * blockDim.x + threadIdx.x~
+- ~y_C = blockIdx.y * blockDim.y + threadIdx.y~
+
+This results in the following kernel:
+#+begin_src cuda
+  __global__ void naive_matmul(float* A, float* B, float* C, int M, int N, int K) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x; // Moving fast in a warp
+    int j = blockIdx.y * blockDim.y + threadIdx.y; // Not moving in a warp
+
+    if (i < M && j < N) {
+      float acc = 0.0f;
+      for (int k = 0; k < K; k++) {
+        acc += A[i * K + k] * B[k * N + j]
+      }
+      C[i * N + j] = acc;
+    }
+  }
+#+end_src
+
+Given 2 4096 * 4096 matrices, let's calculate the number of:
+- Compute: every elements will need to multiply & add with other matrix, so ~2 * 4096^3 = 137 GFLOPS~
+- Theoretical read limit: ~2 * 4096^2 * 4 bytes = 128 MiB~
+- Theoretical data to write: ~4096^2 * 4 bytes = 64 MiB~
+
+On H100, it has 67 teraFLOPS / s, so in theory it can be done in ~1.9 ms~ for compute.
+On H100, memory bandwidth is 3.35 TB/s, so ~40~ microseconds of memory latency. Compute is 475 times bigger
+
+Compute / Memory ratio is 47.5. This is still compute bound in theory. If we can use < 47.5x memory access,
+we would be above to achieve the best performance.
+
+** Global memory Coalescing
+
+32 threads in the consecutive ~threadId = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blcokDIm.y~ can form a warp.
+Within each warp, we want to have locality in terms of memory.
+access across each threads.
+
+For example, thread 0 and thread 1 should access memory near each other, and ideally all the memory accessed by 32 threads
+in the warp should become a consecutive block in global memory.
+
+The concept of a warp is relevant for this second kernel,
+as sequential memory accesses by threads that are part of the same warp can be grouped and executed as one.
+
+In the naive kernel, each threads, in the inner loop, is accessing the memory consecutively. However, across the wrap
+the access is not consecutive.
+
+
+All we need to do here is to swap the index of ~x~ and ~y~:
+#+begin_src cuda
+  __global__ void naive_matmul(float* A, float* B, float* C, int M, int N, int K) {
+    int i = blockIdx.y * blockDim.y + threadIdx.y; // Let i remains the same in the warp
+    int j = blockIdx.x * blockDim.x + threadIdx.x; // Let j moves in the same warp
+
+    if (i < M && j < N) {
+      float acc = 0.0f;
+      for (int k = 0; k < K; k++) {
+        // A matrix access is not coalesed but broadcasted
+        // B matrix access is coalesced
+        acc += A[i * K + k] * B[k * N + j]
+      }
+      // Write is also coalesced
+      C[i * N + j] = acc;
+    }
+  }
+#+end_src
+
+
+
+** Shared memory tiling
+*** Memory access latency:
+- Register: 1 clock, 8 TB/s
+- Shared memory: 32 clocks, 1.5 TB /s
+- Local -> Global: 800 clocks, 200 GB / s
+- Host: 5 GB/s
+

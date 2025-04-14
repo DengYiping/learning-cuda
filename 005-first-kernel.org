@@ -549,6 +549,138 @@ we lose slightly to speed. It is hardware guaranteed to be memory safe at a cost
 
 ** Integer Atomic Operations
 
+- ~atomicAdd(int* address, int val)~: Atomically adds val to the value at address and returns the old value.
+- ~atomicSub(int* address, int val)~: Atomically subtracts val from the value at address and returns the old value.
+- ~atomicExch(int* address, int val)~: Atomically exchanges val with the value at address and returns the old value.
+- ~atomicMin(int* address, int val)~: Atomically computes the minimum of val and the value at address, stores it at address, and returns the old value.
+- ~atomicMax(int* address, int val)~: Atomically computes the maximum of val and the value at address, stores it at address, and returns the old value.
+- ~atomicInc(unsigned int* address, unsigned int val)~: Atomically increments the value at address and returns the old value. If the incremented value is greater than val, it wraps to 0.
+- ~atomicDec(unsigned int* address, unsigned int val)~: Atomically decrements the value at address and returns the old value. If the decremented value is equal to 0xFFFFFFFF, it wraps to val.
+- ~atomicCAS(int* address, int compare, int val)~: Atomically performs Compare-And-Swap. If the value at address equals compare, it is replaced with val. Returns the old value.
+- ~atomicAnd(int* address, int val)~: Atomically performs bitwise AND between val and the value at address, stores the result at address, and returns the old value.
+- ~atomicOr(int* address, int val)~: Atomically performs bitwise OR between val and the value at address, stores the result at address, and returns the old value.
+- ~atomicXor(int* address, int val)~: Atomically performs bitwise XOR between val and the value at address, stores the result at address, and returns the old value.
 
+** Floating-Point Atomic Operations
 
+- ~atomicAdd(float* address, float val)~: Atomically adds val to the value at address and returns the old value.
+- ~atomicExch(float* address, float val)~: Atomically exchanges val with the value at address and returns the old value.
 
+** Double-Precision Atomic Operations (Compute Capability 6.0+)
+
+- ~atomicAdd(double* address, double val)~: Atomically adds val to the value at address and returns the old value.
+
+** Use Cases for Atomics
+
+- Histogram computation
+- Parallel reductions
+- Concurrent data structure updates
+- Synchronization primitives
+- Parallel graph algorithms
+
+** Performance Considerations
+
+- Atomics can cause serialization when many threads try to access the same memory location
+- Use atomics only when necessary
+- Consider using shared memory atomics when possible (faster than global memory atomics)
+- For compute capability 7.0+, consider using cooperative groups for more efficient synchronization
+
+* CUDA streams
+
+You can think of streams as "river streams" where the direction of operations flows only forward in time (like a timeline).
+For example, copy some data over (time step 1), then do some computation (time step 2), then copy some data back (time step 3).
+This is the basic idea behind streams.
+
+We can have multiple streams at once in CUDA, and each stream can have its own timeline.
+This allows us to overlap operations and make better use of the GPU.
+
+When training a massive language model, it would be silly to spend a ton of time loading all the tokens in and out of the GPU.
+Streams allow us to move data around while also doing computation at all times.
+
+Streams introduce a software abstraction called "prefetching",
+which is a way to move data around before it is needed. This is a way to hide the latency of moving data around.
+
+** When launching kernel, you can pass in stream as the last argument for kernel launch
+#+begin_src cuda
+  // Allocate device memory
+    CHECK_CUDA_ERROR(cudaMalloc((void **)&d_A, size));
+    CHECK_CUDA_ERROR(cudaMalloc((void **)&d_B, size));
+    CHECK_CUDA_ERROR(cudaMalloc((void **)&d_C, size));
+
+    // Create streams
+    CHECK_CUDA_ERROR(cudaStreamCreate(&stream1));
+    CHECK_CUDA_ERROR(cudaStreamCreate(&stream2));
+
+    // --- Create a CUDA Event to signal completion of H2D on stream2 ---
+    cudaEvent_t h2d_stream2_complete_event;
+    CHECK_CUDA_ERROR(cudaEventCreate(&h2d_stream2_complete_event));
+
+    // Copy inputs to device asynchronously
+    CHECK_CUDA_ERROR(cudaMemcpyAsync(d_A, h_A, size, cudaMemcpyHostToDevice, stream1));
+    CHECK_CUDA_ERROR(cudaMemcpyAsync(d_B, h_B, size, cudaMemcpyHostToDevice, stream2));
+
+    // Making sure the second stream catches up with first
+    CHECK_CUDA_ERROR(cudaEventRecord(h2d_stream2_complete_event, stream2));
+    CHECK_CUDA_ERROR(cudaStreamWaitEvent(stream1, h2d_stream2_complete_event, 0));
+
+    // Launch kernels on stream1
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (numElements + threadsPerBlock - 1) / threadsPerBlock;
+    vectorAdd<<<blocksPerGrid, threadsPerBlock, 0, stream1>>>(d_A, d_B, d_C, numElements);
+
+    // Copy result back to host asynchronously
+    CHECK_CUDA_ERROR(cudaMemcpyAsync(h_C, d_C, size, cudaMemcpyDeviceToHost, stream1));
+
+    // Synchronize streams
+    CHECK_CUDA_ERROR(cudaStreamSynchronize(stream1));
+    CHECK_CUDA_ERROR(cudaStreamSynchronize(stream2));
+
+    CHECK_CUDA_ERROR(cudaEventDestroy(h2d_stream2_complete_event)); // Destroy the event
+    CHECK_CUDA_ERROR(cudaStreamDestroy(stream1));
+    CHECK_CUDA_ERROR(cudaStreamDestroy(stream2));
+
+#+end_src
+** Advance CUDA stream
+*** Pinned memory
+We should use pinned memory to avoid OS swapping it out of the page.
+#+begin_src cuda
+  // Allocate pinned memory
+  float* h_data;
+  cudaMallocHost((void**)&h_data, size);
+  cudaFreeHost(h_data);
+#+end_src
+*** Priority of stream
+#+begin_src cuda
+    // Create streams with different priorities
+    int leastPriority, greatestPriority;
+    CHECK_CUDA_ERROR(cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
+    CHECK_CUDA_ERROR(cudaStreamCreateWithPriority(&stream1, cudaStreamNonBlocking, leastPriority));
+    CHECK_CUDA_ERROR(cudaStreamCreateWithPriority(&stream2, cudaStreamNonBlocking, greatestPriority));
+#+end_src
+*** Events
+Events can be used to measure execution time, synchronize between streams / host, and overlapping computation and data transfer.
+#+begin_src cuda
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+
+  cudaEventRecord(start, stream);
+  kernel<<<grid, block, 0, stream>>>(args);
+  cudaEventRecord(stop, stream);
+
+  cudaEventSynchronize(stop);
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+#+end_src
+
+Above there is a example of using events to wait
+*** Callbacks
+#+begin_src cuda
+  void CUDART_CB MyCallback(cudaStream_t stream, cudaError_t status, void *userData) {
+    printf("GPU operation completed\n");
+    // Trigger next batch of work
+  }
+
+  kernel<<<grid, block, 0, stream>>>(args);
+  cudaStreamAddCallback(stream, MyCallback, nullptr, 0);
+#+end_src

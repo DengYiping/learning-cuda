@@ -1,0 +1,115 @@
+* CUDA API
+[[\[\[https://docs.nvidia.com/cuda/\]\]
+][CUDA Docs]] covers most of the documents we needs.
+
+Those are higher level API users can use as building blocks.
+
+Those are often the SOTA algorithms for what we want to achieve.
+
+* cuBLAS
+CUDA basic linear algebra subprgrams.
+cuBLAS offers the fastest GEMM / SGEMM, with support for fusion.
+
+*[[https://stackoverflow.com/questions/56043539/cublassgemm-row-major-multiplication][Pay attention to shaping (row major ...)]]*
+
+** Error check
+#+begin_src cuda
+#define CUBLAS_CHECK(call) \
+  do { \
+      cublasStatus_t status = call; \
+      if (status != CUBLAS_STATUS_SUCCESS) { \
+          fprintf(stderr, "cuBLAS error at %s:%d: %d\n", __FILE__, __LINE__, status); \
+          exit(EXIT_FAILURE); \
+      } \
+  } while(0)
+#+end_src
+
+** cuBLAS-Lt
+- cuBLAS lightweight. Aim to use lower precision, bigger matrices.
+- Suitable for deep learning
+
+** cuBLAS-Xt
+- Inteconnect CPU, GPU together to solve problems
+- Supports multi-GPU
+- Often it is bandwidth constraint (CPU / GPU copy, GPU / GPU copy)
+- Thread safety. Synchronize across GPUs
+- Useful for mega scale matrices
+
+** cuBLAS-Dx
+The cuBLASDx library (preview) is a device side API extension for performing BLAS calculations inside CUDA kernels.
+
+You can fuse numerical operation.
+
+- Docs are [[https://docs.nvidia.com/cuda/cublasdx][here]]
+- This is not part of the CUDA toolkit
+
+** CUTLASS
+- cuBLAS is not open source, and cuBLAS-Dx is not well documented or optimized.
+- matmul is the most important operation in deep learning, and cuBLAS doesn't let us easily fuse operations together
+- [[https://github.com/NVIDIA/cutlass][CUTLASS]] (CUDA Templates for Linear Algebra Subroutines) on the other hand (also covered in the optional section) lets us do this.
+- FYI, no, flash attention is not using CUTLASS, just optimized CUDA kernels (read below)
+- https://arxiv.org/pdf/2205.14135
+
+* cuDNN
+** Error check
+#+begin_src cuda
+#define CUDNN_CHECK(call) \
+    do { \
+        cudnnStatus_t status = call; \
+        if (status != CUDNN_STATUS_SUCCESS) { \
+            fprintf(stderr, "cuDNN error at %s:%d: %s\n", __FILE__, __LINE__, \
+                    cudnnGetErrorString(status)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while(0)
+#+end_src
+
+You technically don’t need cuFFT or a ton of manually written custom kernels to
+write a GPT training run + inference.
+
+Fast convolve is built into cuDNN,
+and cuBLAS matmul is included in cuDNN at greater abstraction.
+
+Still a good idea to review the idea of slow conv, fast conv, slow matmul, fast matmul.
+
+NVIDIA cuDNN provides highly tuned implementations of operations
+arising frequently in deep learning applications:
+
+- Convolution forward and backward including cross-correlation
+- GEMM (general matrix multiply)
+- Pooling forward and backward
+- Softmax forward and backward
+- Neuron activations forward and backward: relu, tanh, sigmoid, elu, gelu, softplus, swishArithmetic, mathematical, relational, and logical pointwise operations (including various flavors of forward and backward neuron activations)
+- Tensor transformation functions (reshape, transpose, concat, reshape, etc)
+- LRN, LCN, batch normalization, instance normalization, and layer normalization forward and backward
+
+Beyond just providing performant implementations of individual operations,
+the library also supports a flexible set of multi-operation fusion patterns for further optimization.
+
+The goal is to achieve the best available performance on NVIDIA GPUs
+for important deep learning use cases.
+
+IN cuDNN 8, there is a [[https://docs.nvidia.com/deeplearning/cudnn/backend/latest/developer/graph-api.html#graph-api][Graph API]] which allows the user to express a computation by
+defining an operation graph, rather than by selecting from a fixed set of API calls.
+
+** How Graph API works
+You have these tensor descriptor types implemented as
+“opaque struct types” we previously talked about.
+
+these descriptors can create tensors, define tensor operations, get attributes about tensors, and more.
+
+** cuDNN ~tanh~
+cuDNN kernel for activation might be slow because there is ~alpha~ and ~beta~ to multiply.
+The kernel is not marginally faster.
+
+
+* Larger Rigs / Datacenters
+** ~cuBLAS-mp~: distributed basic dense linear algebra
+This is for multi-GPU, single node level tensor ops, use this if a model can't fit on a single instance.
+** NCCL
+NVIDIA Collective Communications Library => for dist cluster computing
+In PyTorch, you can do:
+- Distributed Data Parallel (DDP)
+- Fully Sharded Data Parallel (FSDP)
+** MIG (Multi-Instance GPU)
+Taking a big GPU and literally slicing it into smaller, independent GPUs
