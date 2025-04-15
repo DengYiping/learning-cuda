@@ -130,5 +130,67 @@ This stall type represents about 37.3% of the total average of 27.4 cycles betwe
 The most problematic one is ~smsp__pcsamp_warps_issue_stalled_long_scoreboard~. This indicates that we spend a lot of time loading from global memory,
 and we spend a lot of time loading from SRAM as well.
 
+** 1D block tiling kernel
+
+We can try to calculate 8 elements in a single thread to reduce the memory pressure for accessing B shared memory:
+#+begin_src cuda
+template <int BM, int BN, int BK, int TM>
+__global__ void block_tiling_matmul_1d(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int M, const int N, const int K) {
+    __shared__ float shared_A[BM][BK];
+    __shared__ float shared_B[BK][BN];
+
+    // blockIdx.x is the block id in the N dimension, aka the column index of the block
+    // blockIdx.y is the block id in the M dimension, aka the row index of the block
+
+    // Each warp will calculate 32 * TM elements, with 32 being the columnar dim.
+    // Num threads = BM * BN / TM, we will 1d tiling on the M dimension.
+    const int thread_col = threadIdx.x % BN;
+    const int thread_row = threadIdx.x / BN;
+
+    // Move blocktile to beginning of A's row and B's column
+    A += blockIdx.y * BM * K;
+    B += blockIdx.x * BN;
+    C += blockIdx.y * BM * N + blockIdx.x * BN;
+
+    const uint inner_col_a = threadIdx.x % BK; // warp-level GMEM coalescing
+    const uint inner_row_a = threadIdx.x / BK;
+    const uint inner_col_b = threadIdx.x % BN; // warp-level GMEM coalescing
+    const uint inner_row_b = threadIdx.x / BN;
+
+    float thread_results[TM] = {0.0f};
+
+    // Assume K is divisible by BK
+    for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
+        // Load A and B tiles into shared memory j
+        shared_A[inner_row_a][inner_col_a] = A[inner_row_a * K + inner_col_a];
+        shared_B[inner_row_b][inner_col_b] = B[inner_row_b * N + inner_col_b];
+
+        __syncthreads();
+
+        // advance blocktile
+        A += BK;
+        B += BK * N;
+
+        // Perform matrix multiplication
+        for (uint dot_idx = 0; dot_idx < BK; dot_idx++) {
+            // This is cached & reused for each thread in the warp
+            float tmp = shared_B[dot_idx][thread_col];
+
+            // We are reading TM elemets from A[thread_row * TM : thread_row * TM + TM][dot_idx]
+            // and multiply with the cached B[thread_col][dot_idx]
+            #pragma unroll
+            for (uint res_idx = 0; res_idx < TM; res_idx++) {
+                thread_results[res_idx] += shared_A[thread_row * TM + res_idx][dot_idx] * tmp;
+            }
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (uint res_idx = 0; res_idx < TM; res_idx++) {
+        C[(thread_row * TM + res_idx) * N + thread_col] = thread_results[res_idx];
+    }
+}
+#+end_src
 
 
