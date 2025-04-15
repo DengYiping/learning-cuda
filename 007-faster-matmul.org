@@ -77,4 +77,58 @@ All we need to do here is to swap the index of ~x~ and ~y~:
 - Shared memory: 32 clocks, 1.5 TB /s
 - Local -> Global: 800 clocks, 200 GB / s
 - Host: 5 GB/s
+*** We can effectively cache the block in sram
+#+begin_src cuda
+  __global__ void sram_matmul(float* A, float* B, float* C, int M, int N, int K) {
+    __shared__ float shared_A[BLOCK_SIZE][BLOCK_SIZE];
+    __shared__ float shared_B[BLOCK_SIZE][BLOCK_SIZE];
+
+    // threadIdx.x changes in the same warp
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+
+
+    if (i < M && j < N) {
+        // sliding window of BLOCK_SIZE x BLOCK_SIZE
+        // sliding on the K dimension
+        float sum = 0.0f;
+        for (int w_idx = 0; w_idx < (K + BLOCK_SIZE - 1) / BLOCK_SIZE; w_idx++) {
+            int k_start = w_idx * BLOCK_SIZE;
+
+            // init shared_A, shared_B and shared_C
+            // Check bounds for shared_A and shared_B, add assign value to 0 if out of bounds
+            if (k_start + threadIdx.x < K) {
+                shared_A[threadIdx.y][threadIdx.x] = A[i * K + k_start + threadIdx.x];
+            }
+
+            if (k_start + threadIdx.y < K) {
+                shared_B[threadIdx.y][threadIdx.x] = B[(k_start + threadIdx.y) * N + j];
+            }
+
+            __syncthreads(); // wait for all threads to finish loading data
+            for (int k = 0; k < BLOCK_SIZE && (k_start + k) < K; k++) {
+                sum += shared_A[threadIdx.y][k] * shared_B[k][threadIdx.x];
+            }
+            __syncthreads(); // avoid over-writing shared_A and shared_B before all threads finish the computation
+        }
+        C[i * N + j] = sum;
+    }
+}
+#+end_src
+*** Profiling the SRAM matmul kernel
+
+Let's use the ~ncu --set full~ command to profile our kernel.
+Also, use ~--generate-line-info~ for nvcc for line info.
+
+Some of the suggestions from ncu:
+**** MIO stalls
+On average, each warp of this workload spends 10.2 cycles being stalled waiting for the MIO (memory input/output) instruction queue to be not full.
+This stall reason is high in cases of extreme utilization of the MIO pipelines,
+which include special math instructions, dynamic branches, as well as shared memory instructions. When caused by shared memory accesses, trying to use fewer but wider loads can reduce pipeline pressure.
+This stall type represents about 37.3% of the total average of 27.4 cycles between issuing two instructions.
+
+The most problematic one is ~smsp__pcsamp_warps_issue_stalled_long_scoreboard~. This indicates that we spend a lot of time loading from global memory,
+and we spend a lot of time loading from SRAM as well.
+
+
 
