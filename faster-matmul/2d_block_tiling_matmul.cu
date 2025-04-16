@@ -40,16 +40,14 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
         // So each thread needs to load (BM * BK) / ((BM * BN) / (TM * TN)) = BK * TM * TN / BN
         // This is equivalent to traversing on the BM dimension with stride_A = BM / (BK * TM * TN / BN) = ((BM * BN) / (TM * TN)) / BK =
         // blockDim.x / BK
-        #pragma unroll
-        for (int j = 0; j < BM; j += blockDim.x / BK) {
+        for (uint j = 0; j < BM; j += stride_A) {
             shared_A[inner_row_a + j][inner_col_a] = A[(inner_row_a + j) * K + inner_col_a];
         }
         // For shared_B, we need to load BK * BN in total, and we've got (BM * BN) / (TM * TN) threads
         // So each thread needs to load (BK * BN) / ((BM * BN) / (TM * TN)) = BK * TM * TN / BM
         // This is equivalent to traversing on the BK dimension with stride_B = BK / (BK * TM * TN / BM) = ((BM * BN) / (TM * TN)) / BN =
         // blockDim.x / BN
-        #pragma unroll
-        for (int j = 0; j < BK; j += stride_B) {
+        for (uint j = 0; j < BK; j += stride_B) {
             shared_B[inner_row_b + j][inner_col_b] = B[(inner_row_b + j) * N + inner_col_b];
         }
         __syncthreads();
@@ -58,22 +56,18 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
         B += BK * N;
 
         // Perform matrix multiplication
-        #pragma unroll
         for (uint dot_idx = 0; dot_idx < BK; dot_idx++) {
             // Outer dot product over reg_M and reg_N
-            #pragma unroll
             for (uint i = 0; i < TM; i++) {
                 reg_M[i] = shared_A[thread_row * TM + i][dot_idx];
             }
 
-            #pragma unroll
             for (uint j = 0; j < TN; j++) {
                 reg_N[j] = shared_B[dot_idx][thread_col * TN + j];
             }
 
-            #pragma unroll
-            for (int i = 0; i < TM; i++) {
-                for (int j = 0; j < TN; j++) {
+            for (uint i = 0; i < TM; i++) {
+                for (uint j = 0; j < TN; j++) {
                     thread_results[i][j] += reg_M[i] * reg_N[j];
                 }
             }
@@ -83,10 +77,8 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
     }
 
     // Store the results
-    #pragma unroll
-    for (int i = 0; i < TM; i++) {
-        #pragma unroll
-        for (int j = 0; j < TN; j++) {
+    for (uint j = 0; j < TN; j++) {
+        for (uint i = 0; i < TM; i++) {
             C[(thread_row * TM + i) * N + (thread_col * TN + j)] = thread_results[i][j];
         }
     }
@@ -96,12 +88,12 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
 void launch_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
     constexpr int BM = 128;
     constexpr int BN = 128;
-    constexpr int BK = 8;
+    constexpr int BK = 32;
     constexpr int TM = 4;
     constexpr int TN = 4;
 
     // Each thread will calculate TM * TN elements
-    dim3 blockDim(BM * BN / (TM * TN)); // 256 threads
+    dim3 blockDim(BM * BN / (TM * TN)); 
     // Reversing order to optimize L2 cache access. Grid will move on the N dimension fast and M dimension slow.
     // With row-major layout, this is more cache-friendly.
     dim3 gridDim(CEIL_DIV(n, BN), CEIL_DIV(m, BM));
