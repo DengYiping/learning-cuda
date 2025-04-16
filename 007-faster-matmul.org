@@ -299,10 +299,43 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
 However, with TM = TN = 4, BM = BN = 128, BK =8, we are only achieving 30% of theoretical max.
 
 Let's do some profiling & understand.
+
 *** Occupancy for kernel is low
 We are only achieving 50% occupancy because of register pressure.
 We can tune down the number of register cache by using TM = TN = 4.
 
+** Vectorized 2d block tiling
+We continue to optimize the 2d block tiling kernel by vectorizing the memory access.
+Specifically, we use float4 to load 4 elements per thread for:
+- Loading A tile and B tile from global memory to SRAM
+- Store the result from register back to global memory
 
 
+#+begin_src cuda
+        // For shared_A, we need to load BM * BK in total, and we've got (BM * BN) / (TM * TN) threads
+        // With vectorization, we   can load 4 elements per thread, so each thread needs to load (BM * BK) / ((BM * BN) / (TM * TN)) / 4 = BK * TM * TN / (BN * 4) times
+        // This is equivalent to traversing on the BM dimension with stride_A = BM / (BK * TM * TN / (BN * 4)) = BM * BN * 4 / (BK * TM * TN) =
+        // BM * BN / (TM * TN) * (4 / BK)
+        // Because (BM * BN) / (TM * TN) = blockDim.x, so stride_A = blockDim.x * 4 / BK
+        for (uint j = 0; j < BM; j += stride_A) {
+            reinterpret_cast<float4*>(&shared_A[inner_row_a + j][inner_col_a])[0] = reinterpret_cast<const float4*>(&A[(inner_row_a + j) * K + inner_col_a])[0];
+        }
+        // For shared_B, we need to load BK * BN in total, and we've got (BM * BN) / (TM * TN) threads
+        // With vectorization, we can load 4 elements per thread, so each thread needs to load (BK * BN) / ((BM * BN) / (TM * TN)) / 4 = BK * TM * TN / (BM * 4) times
+        // This is equivalent to traversing on the BK dimension with stride_B = BK / (BK * TM * TN / (BM * 4)) = BK * BM * 4 / (BK * TM * TN) =
+        // BM * BN / (TM * TN) * (4 / BN)
+        // Because (BM * BN) / (TM * TN) = blockDim.x, so stride_B = blockDim.x * 4 / BN
+        for (uint j = 0; j < BK; j += stride_B) {
+            reinterpret_cast<float4*>(&shared_B[inner_row_b + j][inner_col_b])[0] = reinterpret_cast<const float4*>(&B[(inner_row_b + j) * N + inner_col_b])[0];
+        }
+#+end_src
 
+#+begin_src cuda
+    // Store the results
+    for (uint i = 0; i < TM; i++) {
+        for (uint j = 0; j < TN; j+= 4) {
+            float4 result {thread_results[i][j], thread_results[i][j+1], thread_results[i][j+2], thread_results[i][j+3]};
+            reinterpret_cast<float4*>(&C[(thread_row * TM + i) * N + (thread_col * TN)])[0] = result;
+        }
+    }
+#+end_src
