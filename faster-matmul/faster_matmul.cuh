@@ -61,7 +61,7 @@ bool verify_results(float* cpu_result, float* gpu_result, int size, float tolera
 
 // Function type for kernel launchers
 template<typename T>
-using kernel_launcher_t = void (*)(T* d_A, T* d_B, T* d_C, int m, int n, int k, cudaStream_t stream);
+using kernel_launcher_t = void (*)(const T* __restrict__ d_A, const T* __restrict__ d_B, T* __restrict__ d_C, int m, int n, int k, cudaStream_t stream);
 
 // Type conversion function types
 template<typename T>

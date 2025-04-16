@@ -193,4 +193,5 @@ __global__ void block_tiling_matmul_1d(const float* __restrict__ A, const float*
 }
 #+end_src
 
+Reading from the SASS code, you will notice the inner loop load from SRAM is vectorized
 

@@ -1,6 +1,6 @@
 #include "faster_matmul.cuh"
 
-__global__ void naive_matmul(float* A, float* B, float* C, int M, int N, int K) {
+__global__ void naive_matmul(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, int M, int N, int K) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -14,7 +14,7 @@ __global__ void naive_matmul(float* A, float* B, float* C, int M, int N, int K) 
 }
 
 // Kernel launcher function
-void launch_naive_matmul(float* d_A, float* d_B, float* d_C, int m, int n, int k, cudaStream_t stream) {
+void launch_naive_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
     dim3 blockDim(32, 32);
     dim3 gridDim((m + blockDim.x - 1) / blockDim.x, (n + blockDim.y - 1) / blockDim.y);
     

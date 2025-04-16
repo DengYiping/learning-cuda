@@ -3,7 +3,7 @@
 #define CEIL_DIV(M, N) (((M) + (N) - 1) / (N))
 
 template <int BM, int BN, int BK, int TM>
-__global__ void block_tiling_matmul_1d(float* A, float* B, float* C, const int M, const int N, const int K) {
+__global__ void block_tiling_matmul_1d(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int M, const int N, const int K) {
     __shared__ float shared_A[BM][BK];
     __shared__ float shared_B[BK][BN];
 
@@ -12,8 +12,8 @@ __global__ void block_tiling_matmul_1d(float* A, float* B, float* C, const int M
 
     // Each warp will calculate 32 * TM elements, with 32 being the columnar dim.
     // Num threads = BM * BN / TM, we will 1d tiling on the M dimension.
-    const int thread_col = threadIdx.x % BN;
-    const int thread_row = threadIdx.x / BN;
+    const uint thread_col = threadIdx.x % BN;
+    const uint thread_row = threadIdx.x / BN;
 
     // Move blocktile to beginning of A's row and B's column
     A += blockIdx.y * BM * K;
@@ -61,7 +61,7 @@ __global__ void block_tiling_matmul_1d(float* A, float* B, float* C, const int M
 }
 
 // Kernel launcher function
-void launch_1d_block_tiling_matmul(float* d_A, float* d_B, float* d_C, int m, int n, int k, cudaStream_t stream) {
+void launch_1d_block_tiling_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
     constexpr int BM = 64;
     constexpr int BN = 64;
     constexpr int BK = 8;
