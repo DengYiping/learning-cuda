@@ -23,7 +23,7 @@ TN_RANGE = [4, 8]        # Must be multiple of 4
 MAX_THREADS_PER_BLOCK = 1024
 # Max shared memory per block in bytes (e.g., 48 KB for many GPUs)
 # Check your GPU's specs (deviceQuery) if unsure. Can be up to 96KB or more.
-MAX_SHARED_MEMORY_BYTES = 48 * 1024
+MAX_SHARED_MEMORY_BYTES = 128 * 1024
 # --- End Configuration ---
 
 def modify_source(original_content, bm, bn, bk, tm, tn):
@@ -50,6 +50,9 @@ def parse_gflops(output):
 def check_constraints(bm, bn, bk, tm, tn):
     """Checks if the parameter combination is valid."""
     threads_per_block = bm * bn / (tm * tn)
+    if threads_per_block == 0: # Avoid division by zero if tm/tn are large relative to bm/bn
+        # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Invalid thread configuration leads to zero threads.")
+        return False
     if threads_per_block > MAX_THREADS_PER_BLOCK:
         # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Threads per block ({threads_per_block}) exceeds limit ({MAX_THREADS_PER_BLOCK})")
         return False
@@ -57,6 +60,16 @@ def check_constraints(bm, bn, bk, tm, tn):
     shared_mem_needed = (bm * bk + bk * bn) * 4 # sizeof(float)
     if shared_mem_needed > MAX_SHARED_MEMORY_BYTES:
         # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Shared memory ({shared_mem_needed} bytes) exceeds limit ({MAX_SHARED_MEMORY_BYTES})")
+        return False
+
+    # Register pressure constraint (assuming 64k 32-bit registers per SM)
+    # Formula provided: regs_per_thread = TM * TN + TM + TN + 16
+    # Total regs = regs_per_thread * threads_per_block
+    MAX_REGISTERS_PER_SM = 64 * 1024
+    regs_per_thread_approx = tm * tn + tm + tn + 24
+    total_regs_approx = regs_per_thread_approx * threads_per_block
+    if total_regs_approx > MAX_REGISTERS_PER_SM:
+        # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Estimated register usage ({total_regs_approx}) exceeds limit ({MAX_REGISTERS_PER_SM})")
         return False
 
     if bk % 4 != 0:

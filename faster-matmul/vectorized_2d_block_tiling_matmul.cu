@@ -84,11 +84,11 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
 
 // Kernel launcher function
 void launch_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
-    constexpr int BM = 128;
-    constexpr int BN = 256;
-    constexpr int BK = 32;
-    constexpr int TM = 4;
-    constexpr int TN = 8;
+    constexpr int BM = 64;
+    constexpr int BN = 128;
+    constexpr int BK = 64;
+    constexpr int TM = 8;
+    constexpr int TN = 4;
 
     // Each thread will calculate TM * TN elements
     dim3 blockDim(BM * BN / (TM * TN)); 
@@ -100,11 +100,11 @@ void launch_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* _
 }
 
 int main() {
-    constexpr int BM = 128;
-    constexpr int BN = 256;
-    constexpr int BK = 32;
-    constexpr int TM = 4;
-    constexpr int TN = 8;
+    constexpr int BM = 64;
+    constexpr int BN = 128;
+    constexpr int BK = 64;
+    constexpr int TM = 8;
+    constexpr int TN = 4;
 
     cudaDeviceProp deviceProp;
     CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, 0));
