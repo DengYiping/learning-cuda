@@ -20,17 +20,17 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
     B += blockIdx.x * BN;
     C += blockIdx.y * BM * N + blockIdx.x * BN;
 
-    const uint inner_col_a = (threadIdx.x % (BK / 4)) * 4; // warp-level GMEM coalescing, with vectorization
-    const uint inner_row_a = threadIdx.x / (BK / 4);
-    const uint inner_col_b = (threadIdx.x % (BN / 4)) * 4; // warp-level GMEM coalescing, with vectorization
-    const uint inner_row_b = threadIdx.x / (BN / 4);
-
     float thread_results[TM][TN] = {0.0f};
     float reg_M[TM];
     float reg_N[TN];
 
     const uint stride_A = blockDim.x * 4 / BK;
     const uint stride_B = blockDim.x * 4 / BN;
+
+    const uint inner_col_a = (threadIdx.x % (BK / 4)) * 4; // warp-level GMEM coalescing, with vectorization
+    const uint inner_row_a = threadIdx.x / (BK / 4);
+    const uint inner_col_b = (threadIdx.x % (BN / 4)) * 4; // warp-level GMEM coalescing, with vectorization
+    const uint inner_row_b = threadIdx.x / (BN / 4);
 
     // Assume K is divisible by BK. Outer loop is over block tiles
     for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
@@ -82,7 +82,7 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
     for (uint i = 0; i < TM; i++) {
         for (uint j = 0; j < TN; j+= 4) {
             float4 result {thread_results[i][j], thread_results[i][j+1], thread_results[i][j+2], thread_results[i][j+3]};
-            reinterpret_cast<float4*>(&C[(thread_row * TM + i) * N + (thread_col * TN)])[0] = result;
+            reinterpret_cast<float4*>(&C[(thread_row * TM + i) * N + (thread_col * TN + j)])[0] = result;
         }
     }
 }
@@ -90,10 +90,10 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
 // Kernel launcher function
 void launch_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
     constexpr int BM = 128;
-    constexpr int BN = 128;
-    constexpr int BK = 32;
-    constexpr int TM = 4;
-    constexpr int TN = 4;
+    constexpr int BN = 256;
+    constexpr int BK = 16;
+    constexpr int TM = 8;
+    constexpr int TN = 8;
 
     // Each thread will calculate TM * TN elements
     dim3 blockDim(BM * BN / (TM * TN)); 
@@ -101,10 +101,29 @@ void launch_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* _
     // With row-major layout, this is more cache-friendly.
     dim3 gridDim(CEIL_DIV(n, BN), CEIL_DIV(m, BM));
     
+
     block_tiling_matmul_2d<BM, BN, BK, TM, TN><<<gridDim, blockDim, 0, stream>>>(d_A, d_B, d_C, m, n, k);
 }
 
 int main() {
+    constexpr int BM = 128;
+    constexpr int BN = 256;
+    constexpr int BK = 16;
+    constexpr int TM = 8;
+    constexpr int TN = 8;
+
+    // Set shared memory carveout for this kernel
+    cudaFuncSetAttribute(
+        block_tiling_matmul_2d<BM, BN, BK, TM, TN>,
+        cudaFuncAttributePreferredSharedMemoryCarveout,
+        50
+    );
+    // Set shared memory size for this kernel
+    cudaFuncSetAttribute(
+        block_tiling_matmul_2d<BM, BN, BK, TM, TN>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        65536 // 64 KB
+    );
     // Default matrix dimensions
     int m = 4096; // Matrix A: m x k
     int n = 2048; // Matrix B: k x n, Matrix C: m x n

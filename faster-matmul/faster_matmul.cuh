@@ -92,6 +92,124 @@ float default_from_type<float>(float val) {
     return val;
 }
 
+template<typename T>
+float benchmark_gpu_kernel(
+    kernel_launcher_t<T> launch_gpu_kernel,
+    const T* __restrict__ d_A,
+    const T* __restrict__ d_B,
+    T* __restrict__ d_C,
+    int m, int n, int k,
+    int iterations,
+    cudaStream_t stream
+) {
+    // Warm‑up launch to mitigate first‑call overheads
+    launch_gpu_kernel(d_A, d_B, d_C, m, n, k, stream);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    // CUDA events for precise timing
+    cudaEvent_t start, stop;
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+
+    CHECK_CUDA(cudaEventRecord(start, stream));
+
+    for (int i = 0; i < iterations; ++i) {
+        launch_gpu_kernel(d_A, d_B, d_C, m, n, k, stream);
+    }
+
+    CHECK_CUDA(cudaEventRecord(stop, stream));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+
+    float milliseconds = 0.0f;
+    CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start, stop));
+
+    // Clean up the events immediately to avoid leaking resources
+    CHECK_CUDA(cudaEventDestroy(start));
+    CHECK_CUDA(cudaEventDestroy(stop));
+
+    return milliseconds / iterations; // Return average execution time per kernel call
+}
+
+// Run benchmark function that only tests GPU performance without CPU validation
+template<typename T>
+float run_benchmark_gpu_only(
+    kernel_launcher_t<T> launch_gpu_kernel, 
+    int m, int n, int k, 
+    int iterations = 10,
+    to_type_converter_t<T> to_type = default_to_type<T>,
+    from_type_converter_t<T> from_type = default_from_type<T>
+) {
+    size_t size_A = m * k * sizeof(T);
+    size_t size_B = k * n * sizeof(T);
+    size_t size_C = m * n * sizeof(T);
+    
+    // Allocate pinned host memory using cudaMallocHost
+    T *h_A, *h_B, *h_C;
+    CHECK_CUDA(cudaMallocHost((void**)&h_A, size_A));
+    CHECK_CUDA(cudaMallocHost((void**)&h_B, size_B));
+    CHECK_CUDA(cudaMallocHost((void**)&h_C, size_C));
+    
+    // Initialize matrices with random values
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    
+    for (int i = 0; i < m * k; i++) {
+        h_A[i] = to_type(dist(gen));
+    }
+    
+    for (int i = 0; i < k * n; i++) {
+        h_B[i] = to_type(dist(gen));
+    }
+    
+    // Allocate device memory
+    T *d_A, *d_B, *d_C;
+    CHECK_CUDA(cudaMalloc((void**)&d_A, size_A));
+    CHECK_CUDA(cudaMalloc((void**)&d_B, size_B));
+    CHECK_CUDA(cudaMalloc((void**)&d_C, size_C));
+    
+    // Copy data to device
+    CHECK_CUDA(cudaMemcpy(d_A, h_A, size_A, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_B, h_B, size_B, cudaMemcpyHostToDevice));
+    
+    // Create CUDA stream
+    cudaStream_t stream;
+    CHECK_CUDA(cudaStreamCreate(&stream));
+    
+    float avg_time_ms = benchmark_gpu_kernel<T>(
+        launch_gpu_kernel,
+        d_A,
+        d_B,
+        d_C,
+        m,
+        n,
+        k,
+        iterations,
+        stream
+    );
+    
+    // Calculate and return performance
+    double flops = 2.0 * m * n * k;  // multiply-add is 2 FLOP per iteration
+    double gflops = (flops * 1e-9) / (avg_time_ms * 1e-3);
+    
+    std::cout << "Matrix dimensions: " << m << "x" << k << " * " << k << "x" << n << std::endl;
+    std::cout << "Average kernel execution time: " << avg_time_ms << " ms" << std::endl;
+    std::cout << "GPU Performance: " << gflops << " GFLOPS" << std::endl;
+    std::cout << "GPU theoretical performance on H100: 67 teraFLOPS" << std::endl;
+    std::cout << "Performance vs theoretical max in percentage: " << gflops / 67e3 * 100 << "%" << std::endl;
+
+    // Clean up - use cudaFreeHost for pinned memory
+    CHECK_CUDA(cudaFreeHost(h_A));
+    CHECK_CUDA(cudaFreeHost(h_B));
+    CHECK_CUDA(cudaFreeHost(h_C));
+    CHECK_CUDA(cudaFree(d_A));
+    CHECK_CUDA(cudaFree(d_B));
+    CHECK_CUDA(cudaFree(d_C));
+    CHECK_CUDA(cudaStreamDestroy(stream));
+    
+    return avg_time_ms;
+}
+
 // Run benchmark function that tests a kernel against CPU implementation
 template<typename T>
 float run_benchmark(
@@ -166,27 +284,17 @@ float run_benchmark(
     double cpu_gflops = (cpu_flops * 1e-9) / (cpu_duration.count() * 1e-3);
     std::cout << "CPU Performance: " << cpu_gflops << " GFLOPS" << std::endl;
     
-    // Warmup GPU
-    launch_gpu_kernel(d_A, d_B, d_C, m, n, k, stream);
-    CHECK_CUDA(cudaDeviceSynchronize());
-    
-    // Benchmark GPU implementation
-    cudaEvent_t start, stop;
-    CHECK_CUDA(cudaEventCreate(&start));
-    CHECK_CUDA(cudaEventCreate(&stop));
-    
-    CHECK_CUDA(cudaEventRecord(start, stream));
-    
-    for (int i = 0; i < iterations; i++) {
-        launch_gpu_kernel(d_A, d_B, d_C, m, n, k, stream);
-    }
-    
-    CHECK_CUDA(cudaEventRecord(stop, stream));
-    CHECK_CUDA(cudaEventSynchronize(stop));
-    
-    float milliseconds = 0;
-    CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start, stop));
-    float avg_time_ms = milliseconds / iterations;
+    float avg_time_ms = benchmark_gpu_kernel<T>(
+        launch_gpu_kernel,
+        d_A,
+        d_B,
+        d_C,
+        m,
+        n,
+        k,
+        iterations,
+        stream
+    );
     
     // Copy result back to host
     CHECK_CUDA(cudaMemcpy(h_C, d_C, size_C, cudaMemcpyDeviceToHost));
@@ -219,8 +327,8 @@ float run_benchmark(
     }
 
     // Calculate and return performance
-    double flops = 2.0 * m * n * k * iterations;  // multiply-add is 2 FLOP
-    double gflops = (flops * 1e-9) / (milliseconds * 1e-3);
+    double flops = 2.0 * m * n * k;  // multiply-add is 2 FLOP per iteration
+    double gflops = (flops * 1e-9) / (avg_time_ms * 1e-3);
     
     std::cout << "Matrix dimensions: " << m << "x" << k << " * " << k << "x" << n << std::endl;
     std::cout << "Average kernel execution time: " << avg_time_ms << " ms" << std::endl;
@@ -241,8 +349,6 @@ float run_benchmark(
     CHECK_CUDA(cudaFree(d_B));
     CHECK_CUDA(cudaFree(d_C));
     CHECK_CUDA(cudaStreamDestroy(stream));
-    CHECK_CUDA(cudaEventDestroy(start));
-    CHECK_CUDA(cudaEventDestroy(stop));
     
     return avg_time_ms;
 }
