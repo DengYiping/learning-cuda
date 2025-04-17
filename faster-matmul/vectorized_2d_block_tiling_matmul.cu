@@ -4,8 +4,8 @@
 
 template <int BM, int BN, int BK, int TM, int TN>
 __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int M, const int N, const int K) {
-    __shared__ float shared_A[BM][BK];
-    __shared__ float shared_B[BK][BN];
+    extern __shared__ float shared_A[];
+    float* shared_B = shared_A + BM * BK;
 
     // blockIdx.x is the block id in the N dimension, aka the column index of the block
     // blockIdx.y is the block id in the M dimension, aka the row index of the block
@@ -24,35 +24,30 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
     float reg_M[TM];
     float reg_N[TN];
 
-    const uint stride_A = blockDim.x * 4 / BK;
-    const uint stride_B = blockDim.x * 4 / BN;
-
-    const uint inner_col_a = (threadIdx.x % (BK / 4)) * 4; // warp-level GMEM coalescing, with vectorization
-    const uint inner_row_a = threadIdx.x / (BK / 4);
-    const uint inner_col_b = (threadIdx.x % (BN / 4)) * 4; // warp-level GMEM coalescing, with vectorization
-    const uint inner_row_b = threadIdx.x / (BN / 4);
-
     // Assume K is divisible by BK. Outer loop is over block tiles
     for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
-        // Load A and B tiles into shared memory
+        // compute the start of this A‐tile and B‐tile exactly
 
-        // For shared_A, we need to load BM * BK in total, and we've got (BM * BN) / (TM * TN) threads
-        // With vectorization, we   can load 4 elements per thread, so each thread needs to load (BM * BK) / ((BM * BN) / (TM * TN)) / 4 = BK * TM * TN / (BN * 4) times
-        // This is equivalent to traversing on the BM dimension with stride_A = BM / (BK * TM * TN / (BN * 4)) = BM * BN * 4 / (BK * TM * TN) =
-        // BM * BN / (TM * TN) * (4 / BK)
-        // Because (BM * BN) / (TM * TN) = blockDim.x, so stride_A = blockDim.x * 4 / BK
-        for (uint j = 0; j < BM; j += stride_A) {
-            reinterpret_cast<float4*>(&shared_A[inner_row_a + j][inner_col_a])[0] = reinterpret_cast<const float4*>(&A[(inner_row_a + j) * K + inner_col_a])[0];
+        // load A_tile into shared_A
+        for (int idx = threadIdx.x; idx < (BM * BK)/4; idx += blockDim.x) {
+            int f = idx * 4;
+            int row = f / BK;
+            int col = f % BK;
+            reinterpret_cast<float4*>(shared_A)[idx] =
+                reinterpret_cast<const float4*>(A)[ row*(K/4) + (col/4) ];
         }
-        // For shared_B, we need to load BK * BN in total, and we've got (BM * BN) / (TM * TN) threads
-        // With vectorization, we can load 4 elements per thread, so each thread needs to load (BK * BN) / ((BM * BN) / (TM * TN)) / 4 = BK * TM * TN / (BM * 4) times
-        // This is equivalent to traversing on the BK dimension with stride_B = BK / (BK * TM * TN / (BM * 4)) = BK * BM * 4 / (BK * TM * TN) =
-        // BM * BN / (TM * TN) * (4 / BN)
-        // Because (BM * BN) / (TM * TN) = blockDim.x, so stride_B = blockDim.x * 4 / BN
-        for (uint j = 0; j < BK; j += stride_B) {
-            reinterpret_cast<float4*>(&shared_B[inner_row_b + j][inner_col_b])[0] = reinterpret_cast<const float4*>(&B[(inner_row_b + j) * N + inner_col_b])[0];
+
+        // load B_tile into shared_B
+        for (int idx = threadIdx.x; idx < (BK * BN)/4; idx += blockDim.x) {
+            int f = idx * 4;
+            int row = f / BN;
+            int col = f % BN;
+            reinterpret_cast<float4*>(shared_B)[idx] =
+                reinterpret_cast<const float4*>(B)[ row*(N/4) + (col/4) ];
         }
+
         __syncthreads();
+
         // advance blocktile
         A += BK;
         B += BK * N;
@@ -61,11 +56,11 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
         for (uint dot_idx = 0; dot_idx < BK; dot_idx++) {
             // Outer dot product over reg_M and reg_N
             for (uint i = 0; i < TM; i++) {
-                reg_M[i] = shared_A[thread_row * TM + i][dot_idx];
+                reg_M[i] = shared_A[(thread_row * TM + i) * BK + dot_idx];
             }
 
             for (uint j = 0; j < TN; j++) {
-                reg_N[j] = shared_B[dot_idx][thread_col * TN + j];
+                reg_N[j] = shared_B[dot_idx * BN + (thread_col * TN + j)];
             }
 
             for (uint i = 0; i < TM; i++) {
@@ -91,8 +86,8 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
 void launch_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
     constexpr int BM = 128;
     constexpr int BN = 256;
-    constexpr int BK = 16;
-    constexpr int TM = 8;
+    constexpr int BK = 32;
+    constexpr int TM = 4;
     constexpr int TN = 8;
 
     // Each thread will calculate TM * TN elements
@@ -101,29 +96,36 @@ void launch_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* _
     // With row-major layout, this is more cache-friendly.
     dim3 gridDim(CEIL_DIV(n, BN), CEIL_DIV(m, BM));
     
-
-    block_tiling_matmul_2d<BM, BN, BK, TM, TN><<<gridDim, blockDim, 0, stream>>>(d_A, d_B, d_C, m, n, k);
+    block_tiling_matmul_2d<BM, BN, BK, TM, TN><<<gridDim, blockDim, BM * BK * sizeof(float) + BN * BK * sizeof(float), stream>>>(d_A, d_B, d_C, m, n, k);
 }
 
 int main() {
     constexpr int BM = 128;
     constexpr int BN = 256;
-    constexpr int BK = 16;
-    constexpr int TM = 8;
+    constexpr int BK = 32;
+    constexpr int TM = 4;
     constexpr int TN = 8;
 
+    cudaDeviceProp deviceProp;
+    CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, 0));
+    std::cout << "Device name: " << deviceProp.name << std::endl;
+    std::cout << "Shared memory size: " << deviceProp.sharedMemPerMultiprocessor << std::endl;
+    std::cout << "Shared memory size per block: " << deviceProp.sharedMemPerBlock << std::endl;
+
+
     // Set shared memory carveout for this kernel
-    cudaFuncSetAttribute(
+    CHECK_CUDA(cudaFuncSetAttribute(
         block_tiling_matmul_2d<BM, BN, BK, TM, TN>,
         cudaFuncAttributePreferredSharedMemoryCarveout,
-        50
-    );
+        75
+    ));
     // Set shared memory size for this kernel
-    cudaFuncSetAttribute(
+    CHECK_CUDA(cudaFuncSetAttribute(
         block_tiling_matmul_2d<BM, BN, BK, TM, TN>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
-        65536 // 64 KB
-    );
+        128 * 1024
+    ));
+
     // Default matrix dimensions
     int m = 4096; // Matrix A: m x k
     int n = 2048; // Matrix B: k x n, Matrix C: m x n

@@ -104,7 +104,8 @@ float benchmark_gpu_kernel(
 ) {
     // Warm‑up launch to mitigate first‑call overheads
     launch_gpu_kernel(d_A, d_B, d_C, m, n, k, stream);
-    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+    CHECK_CUDA(cudaGetLastError());
 
     // CUDA events for precise timing
     cudaEvent_t start, stop;
@@ -115,6 +116,8 @@ float benchmark_gpu_kernel(
 
     for (int i = 0; i < iterations; ++i) {
         launch_gpu_kernel(d_A, d_B, d_C, m, n, k, stream);
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+        CHECK_CUDA(cudaGetLastError());
     }
 
     CHECK_CUDA(cudaEventRecord(stop, stream));
