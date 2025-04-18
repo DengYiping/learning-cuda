@@ -339,3 +339,46 @@ Specifically, we use float4 to load 4 elements per thread for:
         }
     }
 #+end_src
+
+** Warp tiling kernel
+Warp is a construct of CUDA that's invisible to the programmer. However, it's important for the performance of the kernel:
+- Warps are the unit of scheduling that is mapped to the warp-schedulers that are part of the SM.
+- Shared-memory bank conflicts (I’ll cover those in a future post) happen only between threads that are in the same warp.
+- There’s a register cache on recent GPUs, and tighter threadtiling gives us more register cache locality.
+- New feature called warp specialization allows us to specialize the code for each warp within a block.
+
+Warptiling is elegant since we now make explicit all levels of parallelism:
+
+- Blocktiling: Different blocks can execute in parallel on different SMs.
+- Warptiling: Different warps can execute in parallel on different warp schedulers, and concurrently on the same warp scheduler.
+- Threadtiling: (a very limited amount of) instructions can execute in parallel on the same CUDA cores (= instruction-level parallelism aka ILP).
+
+In another perspective:
+- thread  → registers
+- warp    → registers plus fast register-to-register shuffle network
+- block   → on-chip shared memory
+
+
+Thread-tiling
+What it is: Each individual thread is asked to compute a small patch (e.g., 2x2 or 4x4 results) instead of only one result.
+Where data live while being reused: the thread's registers.
+Purpose:
+- Reuse operands several times after one load, increasing arithmetic intensity.
+- Generate more independent instructions per thread (higher ILP).
+- Reduce indexing/branching overhead and often produce perfectly-coalesced global accesses.
+
+Warp-tiling
+What it is: The 32 threads that execute in lock-step (a warp) cooperate on a somewhat larger tile. They usually load it with one or two coalesced transactions and then exchange the pieces each thread needs with shuffle instructions (or, in older code, with shared memory).
+Where data live while being reused: registers that are exchanged through the warp-shuffle network.
+Purpose:
+- Let every value brought from global memory be consumed by many threads in the same warp.
+- Avoid—or at least minimise—the use of shared memory for data that are only needed inside one warp, thereby saving shared-memory capacity for inter-warp reuse.
+- Avoid shared-memory bank conflicts.
+
+Block-tiling
+What it is: All threads of a thread-block stage an even larger tile in shared memory, typically in several steps along a loop. Each warp then processes its own warp-tile using that shared tile as input.
+Where data live while being reused: on-chip shared memory (visible to every warp in the block).
+Purpose:
+- Fetch each global-memory element once per block instead of once per warp or once per thread, cutting global memory traffic dramatically.
+- Provide a synchronization point ( __syncthreads() ) that allows predictable, race-free reuse.
+- Exploit the fact that shared memory is an order of magnitude faster than global memory.
