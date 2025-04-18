@@ -82,7 +82,7 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
 }
 
 // Kernel launcher function
-void launch_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
+void launch_vectorized_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
     constexpr int BM = 64;
     constexpr int BN = 128;
     constexpr int BK = 64;
@@ -114,13 +114,13 @@ int main() {
 
     // Set shared memory carveout for this kernel
     CHECK_CUDA(cudaFuncSetAttribute(
-        block_tiling_matmul_2d<BM, BN, BK, TM, TN>,
+        vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN>,
         cudaFuncAttributePreferredSharedMemoryCarveout,
         75
     ));
     // Set shared memory size for this kernel
     CHECK_CUDA(cudaFuncSetAttribute(
-        block_tiling_matmul_2d<BM, BN, BK, TM, TN>,
+        vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         128 * 1024
     ));
@@ -134,7 +134,7 @@ int main() {
     
     // Run the benchmark with the naive matrix multiplication kernel
     float avg_time = run_benchmark<float>(
-        launch_2d_block_tiling_matmul, m, n, k
+        launch_vectorized_2d_block_tiling_matmul, m, n, k
     );
     
     return 0;
