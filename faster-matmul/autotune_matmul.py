@@ -20,10 +20,10 @@ BK_RANGE = [8, 16, 32, 64]  # Must be multiple of 4
 TM_RANGE = [4, 8]
 TN_RANGE = [4, 8]        # Must be multiple of 4
 
-MAX_THREADS_PER_BLOCK = 1024
+MAX_THREADS_PER_BLOCK = 2048
 # Max shared memory per block in bytes (e.g., 48 KB for many GPUs)
 # Check your GPU's specs (deviceQuery) if unsure. Can be up to 96KB or more.
-MAX_SHARED_MEMORY_BYTES = 128 * 1024
+MAX_SHARED_MEMORY_BYTES = 220 * 1024
 # --- End Configuration ---
 
 def modify_source(original_content, bm, bn, bk, tm, tn):
@@ -57,7 +57,7 @@ def check_constraints(bm, bn, bk, tm, tn):
         # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Threads per block ({threads_per_block}) exceeds limit ({MAX_THREADS_PER_BLOCK})")
         return False
 
-    shared_mem_needed = (bm * bk + bk * bn) * 4 # sizeof(float)
+    shared_mem_needed = (bm * bk + bk * bn) * 8 # sizeof(float)
     if shared_mem_needed > MAX_SHARED_MEMORY_BYTES:
         # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Shared memory ({shared_mem_needed} bytes) exceeds limit ({MAX_SHARED_MEMORY_BYTES})")
         return False
@@ -66,7 +66,7 @@ def check_constraints(bm, bn, bk, tm, tn):
     # Formula provided: regs_per_thread = TM * TN + TM + TN + 16
     # Total regs = regs_per_thread * threads_per_block
     MAX_REGISTERS_PER_SM = 64 * 1024
-    regs_per_thread_approx = tm * tn + tm + tn + 24
+    regs_per_thread_approx = tm * tn + tm + tn + 13
     total_regs_approx = regs_per_thread_approx * threads_per_block
     if total_regs_approx > MAX_REGISTERS_PER_SM:
         # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Estimated register usage ({total_regs_approx}) exceeds limit ({MAX_REGISTERS_PER_SM})")
