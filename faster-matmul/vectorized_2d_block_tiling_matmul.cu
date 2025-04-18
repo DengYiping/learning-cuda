@@ -3,7 +3,7 @@
 #define CEIL_DIV(M, N) (((M) + (N) - 1) / (N))
 
 template <int BM, int BN, int BK, int TM, int TN>
-__global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int M, const int N, const int K) {
+__global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int M, const int N, const int K) {
     extern __shared__ float shared_A[];
     float* shared_B = shared_A + BM * BK;
 
@@ -59,8 +59,8 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
                 reg_M[i] = shared_A[(thread_row * TM + i) * BK + dot_idx];
             }
 
-            for (uint j = 0; j < TN; j++) {
-                reg_N[j] = shared_B[dot_idx * BN + (thread_col * TN + j)];
+            for (uint j = 0; j < TN; j+= 4) {
+                reinterpret_cast<float4*>(&reg_N[j])[0] = reinterpret_cast<float4*>(&shared_B[dot_idx * BN + (thread_col * TN + j)])[0];
             }
 
             for (uint i = 0; i < TM; i++) {
@@ -76,8 +76,7 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
     // Store the results
     for (uint i = 0; i < TM; i++) {
         for (uint j = 0; j < TN; j+= 4) {
-            float4 result {thread_results[i][j], thread_results[i][j+1], thread_results[i][j+2], thread_results[i][j+3]};
-            reinterpret_cast<float4*>(&C[(thread_row * TM + i) * N + (thread_col * TN + j)])[0] = result;
+            reinterpret_cast<float4*>(&C[(thread_row * TM + i) * N + (thread_col * TN + j)])[0] = reinterpret_cast<float4*>(&thread_results[i][j])[0];
         }
     }
 }
@@ -96,7 +95,7 @@ void launch_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* _
     // With row-major layout, this is more cache-friendly.
     dim3 gridDim(CEIL_DIV(n, BN), CEIL_DIV(m, BM));
     
-    block_tiling_matmul_2d<BM, BN, BK, TM, TN><<<gridDim, blockDim, BM * BK * sizeof(float) + BN * BK * sizeof(float), stream>>>(d_A, d_B, d_C, m, n, k);
+    vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN><<<gridDim, blockDim, BM * BK * sizeof(float) + BN * BK * sizeof(float), stream>>>(d_A, d_B, d_C, m, n, k);
 }
 
 int main() {
