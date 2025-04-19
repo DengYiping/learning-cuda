@@ -43,10 +43,6 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
     auto group = cooperative_groups::this_thread_block();
     cuda::pipeline<scope> pipe = cuda::make_pipeline();
 
-    // Pointers that advance through global memory for this block
-    const float* gA = A;           // Points to current block row, advanced along K dimension later
-    const float* gB = B;           // Points to current block column, advanced along K dimension later
-
     // Stage indices (ping-pong)
     int write_stage = 0;  // stage currently being filled
     int read_stage  = 0;  // stage currently being consumed
@@ -54,7 +50,6 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
     // ---------------- Prime the pipeline : load the very first tile ----------------
     pipe.producer_acquire();
     // load A_tile into shared_A
-    #pragma unroll
     for (int idx = threadIdx.x; idx < (BM * BK)/4; idx += blockDim.x) {
         int f = idx * 4;
         int row = f / BK;
@@ -62,14 +57,13 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
         cuda::memcpy_async(
             thread,
             &reinterpret_cast<float4*>(smem_A[write_stage])[idx],
-            &reinterpret_cast<const float4*>(gA)[row*(K/4) + (col/4)],
-            cuda::aligned_size_t<128>(sizeof(float4)),
+            &reinterpret_cast<const float4*>(A)[row*(K/4) + (col/4)],
+            cuda::aligned_size_t<16>(sizeof(float4)),
             pipe
         );
     }
 
     // load B_tile into shared_B
-    #pragma unroll
     for (int idx = threadIdx.x; idx < (BK * BN)/4; idx += blockDim.x) {
         int f = idx * 4;
         int row = f / BN;
@@ -77,16 +71,16 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
         cuda::memcpy_async(
             thread,
             &reinterpret_cast<float4*>(smem_B[write_stage])[idx],
-            &reinterpret_cast<const float4*>(gB)[row*(N/4) + (col/4)],
-            cuda::aligned_size_t<128>(sizeof(float4)),
+            &reinterpret_cast<const float4*>(B)[row*(N/4) + (col/4)],
+            cuda::aligned_size_t<16>(sizeof(float4)),
             pipe
         );
     }
     pipe.producer_commit();
 
     // Advance global pointers to the next tile along K
-    gA += BK;            // next A tile starts BK columns to the right
-    gB += BK * N;        // next B tile is BK rows down
+    A += BK;            // next A tile starts BK columns to the right
+    B += BK * N;        // next B tile is BK rows down
 
     // number of K-tiles we will iterate over
     const uint num_tiles = (K + BK - 1) / BK; // assume K % BK == 0, but keep generic
@@ -97,7 +91,6 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
             write_stage ^= 1;            // toggle between 0 and 1
             pipe.producer_acquire();
             // load A_tile into shared_A
-            #pragma unroll
             for (int idx = threadIdx.x; idx < (BM * BK)/4; idx += blockDim.x) {
                 int f = idx * 4;
                 int row = f / BK;
@@ -105,14 +98,13 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
                 cuda::memcpy_async(
                     thread,
                     &reinterpret_cast<float4*>(smem_A[write_stage])[idx],
-                    &reinterpret_cast<const float4*>(gA)[row*(K/4) + (col/4)],
-                    cuda::aligned_size_t<128>(sizeof(float4)),
+                    &reinterpret_cast<const float4*>(A)[row*(K/4) + (col/4)],
+                    cuda::aligned_size_t<16>(sizeof(float4)),
                     pipe
                 );
             }
 
             // load B_tile into shared_B
-            #pragma unroll
             for (int idx = threadIdx.x; idx < (BK * BN)/4; idx += blockDim.x) {
                 int f = idx * 4;
                 int row = f / BN;
@@ -120,16 +112,16 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
                 cuda::memcpy_async(
                     thread,
                     &reinterpret_cast<float4*>(smem_B[write_stage])[idx],
-                    &reinterpret_cast<const float4*>(gB)[row*(N/4) + (col/4)],
-                    cuda::aligned_size_t<128>(sizeof(float4)),
+                    &reinterpret_cast<const float4*>(B)[row*(N/4) + (col/4)],
+                    cuda::aligned_size_t<16>(sizeof(float4)),
                     pipe
                 );
             }
             pipe.producer_commit();
 
             // Advance global pointers for A and B to point at the subsequent tile
-            gA += BK;
-            gB += BK * N;
+            A += BK;
+            B += BK * N;
         }
         // Wait for the tile in "read_stage" to be fully copied to shared memory
         pipe.consumer_wait();
