@@ -382,3 +382,106 @@ Purpose:
 - Fetch each global-memory element once per block instead of once per warp or once per thread, cutting global memory traffic dramatically.
 - Provide a synchronization point ( __syncthreads() ) that allows predictable, race-free reuse.
 - Exploit the fact that shared memory is an order of magnitude faster than global memory.
+
+** Double buffering – hiding memory latency with a small software pipeline
+
+At this point our kernel is already *compute‑bound* most of the time, but every
+time we move to the next K‑tile we still do the following strictly
+sequentially:
+
+1. Load `A_tile` and `B_tile` from global memory → shared memory
+2. `__syncthreads()`
+3. Run the inner FMAs that use that tile
+4. `__syncthreads()` so that the next load does not clobber the tile we are
+   still reading from
+
+The two synchronisations mean that *all* threads in the block are stalled
+during the load phases – the SM issues no arithmetic instructions while the
+memory pipelines are busy, so those ~800 cycle GMEM latencies show up as very
+obvious `long scoreboard` stalls in Nsight Compute.
+
+Double buffering (sometimes called *ping‑pong buffering*) removes the
+serialization by reserving **two** backing buffers in shared memory:
+
+# +begin_example
+|  A_0  |  B_0  |  A_1  |  B_1  |   ←   shared memory (one thread‑block)
+            ↑          ↑
+        compute   preload next tile
+# +end_example
+
+While the warps are performing the FMAs that use the data in buffer `0`, *the
+same* warps start to fill buffer `1` with the data that will be needed in the
+next iteration.  When the computation finishes we just flip the read/write
+roles of the two buffers and continue.  The effect is a tiny software
+pipeline of depth 2:
+
+# +begin_example
+Iteration i :  [ load_i   ][ compute_i ]
+Iteration i+1:            [ load_{i+1}   ][ compute_{i+1} ]
+# +end_example
+
+*** Case 1 – No asynchronous copy instructions (pre-Ampere)***
+
+On architectures that do **not** have `cp.async`/`cuda::memcpy_async` we still
+benefit from double buffering because the compiler and the GPU scheduler are
+able to overlap the *instruction streams* of the load loop and the compute
+loop.
+
+• Each thread issues a `ld.global` followed almost immediately by independent
+  arithmetic instructions.  Since the FMA does **not** depend on the result of
+  the load, the hardware scoreboard allows both to be in flight at the same
+  time.
+• That gives us tens of FMAs worth of *instruction-level parallelism* (ILP)
+  per thread that the scheduler can use to hide the ~400-800 cycle memory
+  latency.
+• The overlap is not perfect – if the kernel runs out of independent
+  arithmetic instructions the warp will still stall – but compared with the
+  fully sequential version the stall percentage drops dramatically and the
+  achieved FLOP/s goes up correspondingly.
+
+You can observe this in Nsight Compute: the `smsp__inst_executed` metric stays
+flat while `smsp__sass_average_branch_targets_threads_uniform_pct` decreases –
+fewer warps are blocked on a long scoreboard.
+
+*** Case 2 – Using `cp.async` / `cuda::memcpy_async` (Ampere +)***
+
+Starting with Ampere the architecture exposes *asynchronous* bulk copy
+instructions that transfer data from global memory to shared memory through a
+dedicated *LSU pipeline*.  The key properties are:
+
+• The instruction returns **immediately**; the thread can continue issuing
+  arithmetic ops while the copy progresses in the background.
+• A small in-flight queue (size ≈ 16) per warp hides the latency of the copy
+  even if no other warps are ready.
+• A new `cuda::pipeline` / `cp.async.wait()` API lets us express the
+  producer/consumer relationship explicitly and avoid the full
+  `__syncthreads()` barrier – we only need a `consumer_wait()` right before the
+  tile is accessed.
+
+With these instructions the timeline looks like this:
+
+```
+load_i (async)
+                           compute_i (uses previous tile)
+--------------------------------------------------------------------------------
+consumer_wait()            load_{i+1} (async)                  compute_{i+1}
+```
+
+All the large memory latencies are now completely overlapped with useful work.
+Nsight Compute will show the *memory* stall reasons dropping close to 0%, and
+the kernel becomes limited by either the tensor/FMA throughput or by the
+number of registers per thread (i.e. occupancy).
+
+In practice enabling double buffering with `cp.async` tends to improve a well
+tilled matmul kernel by another 1.2× – 1.4× on Ampere and Hopper GPUs.
+
+***Key take-aways***
+
+• Double buffering hides *compulsory* memory latency by building a tiny
+  software pipeline.
+• Without async copies we rely on ILP to overlap the independent load and
+  compute instructions; the overlap is partial but still worthwhile.
+• With async copies the overlap is explicit and nearly perfect, allowing the
+  kernel to sustain throughput very close to the theoretical FMAs/clock of the
+  SM.
+
