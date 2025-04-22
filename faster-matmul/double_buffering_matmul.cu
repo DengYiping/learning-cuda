@@ -50,31 +50,31 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
     // ---------------- Prime the pipeline : load the very first tile ----------------
     pipe.producer_acquire();
     // load A_tile into shared_A
-    for (int idx = threadIdx.x; idx < (BM * BK)/4; idx += blockDim.x) {
-        int f = idx * 4;
-        int row = f / BK;
-        int col = f % BK;
+    for (int idx = threadIdx.x; idx < (BM * BK) / 4; idx += blockDim.x) {
+        // Each row of the A tile contains BK/4 float4 elements.
+        int row   = idx / (BK / 4);     // which row in the tile
+        int col4  = idx % (BK / 4);     // which float4 within the row
+
         cuda::memcpy_async(
             thread,
             &reinterpret_cast<float4*>(smem_A[write_stage])[idx],
-            &reinterpret_cast<const float4*>(A)[row*(K/4) + (col/4)],
+            &reinterpret_cast<const float4*>(A)[row * (K / 4) + col4],
             cuda::aligned_size_t<16>(sizeof(float4)),
-            pipe
-        );
+            pipe);
     }
 
     // load B_tile into shared_B
-    for (int idx = threadIdx.x; idx < (BK * BN)/4; idx += blockDim.x) {
-        int f = idx * 4;
-        int row = f / BN;
-        int col = f % BN;
+    for (int idx = threadIdx.x; idx < (BK * BN) / 4; idx += blockDim.x) {
+        // Each row of the B tile contains BN/4 float4 elements.
+        int row   = idx / (BN / 4);
+        int col4  = idx % (BN / 4);
+
         cuda::memcpy_async(
             thread,
             &reinterpret_cast<float4*>(smem_B[write_stage])[idx],
-            &reinterpret_cast<const float4*>(B)[row*(N/4) + (col/4)],
+            &reinterpret_cast<const float4*>(B)[row * (N / 4) + col4],
             cuda::aligned_size_t<16>(sizeof(float4)),
-            pipe
-        );
+            pipe);
     }
     pipe.producer_commit();
 
@@ -91,31 +91,27 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
             write_stage ^= 1;            // toggle between 0 and 1
             pipe.producer_acquire();
             // load A_tile into shared_A
-            for (int idx = threadIdx.x; idx < (BM * BK)/4; idx += blockDim.x) {
-                int f = idx * 4;
-                int row = f / BK;
-                int col = f % BK;
+            for (int idx = threadIdx.x; idx < (BM * BK) / 4; idx += blockDim.x) {
+                int row  = idx / (BK / 4);
+                int col4 = idx % (BK / 4);
                 cuda::memcpy_async(
                     thread,
                     &reinterpret_cast<float4*>(smem_A[write_stage])[idx],
-                    &reinterpret_cast<const float4*>(A)[row*(K/4) + (col/4)],
+                    &reinterpret_cast<const float4*>(A)[row * (K / 4) + col4],
                     cuda::aligned_size_t<16>(sizeof(float4)),
-                    pipe
-                );
+                    pipe);
             }
 
             // load B_tile into shared_B
-            for (int idx = threadIdx.x; idx < (BK * BN)/4; idx += blockDim.x) {
-                int f = idx * 4;
-                int row = f / BN;
-                int col = f % BN;
+            for (int idx = threadIdx.x; idx < (BK * BN) / 4; idx += blockDim.x) {
+                int row  = idx / (BN / 4);
+                int col4 = idx % (BN / 4);
                 cuda::memcpy_async(
                     thread,
                     &reinterpret_cast<float4*>(smem_B[write_stage])[idx],
-                    &reinterpret_cast<const float4*>(B)[row*(N/4) + (col/4)],
+                    &reinterpret_cast<const float4*>(B)[row * (N / 4) + col4],
                     cuda::aligned_size_t<16>(sizeof(float4)),
-                    pipe
-                );
+                    pipe);
             }
             pipe.producer_commit();
 
