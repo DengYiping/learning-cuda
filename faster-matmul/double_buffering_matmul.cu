@@ -149,10 +149,9 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
         read_stage ^= 1;
         group.sync();          // Ensure all threads finished computing before releasing stage
         pipe.consumer_release();
-
-
     }
 
+    
     // At this point, all tiles have been processed and results are in thread_results.
     // ---------------- Store the results to global memory ----------------
     for (uint i = 0; i < TM; ++i) {
