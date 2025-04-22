@@ -338,6 +338,8 @@ float run_benchmark(
     std::cout << "GPU Performance: " << gflops << " GFLOPS" << std::endl;
     std::cout << "GPU theoretical performance on H100: 67 teraFLOPS" << std::endl;
     std::cout << "Performance vs theoretical max in percentage: " << gflops / 67e3 * 100 << "%" << std::endl;
+    // CuBLAS performance 46106.15 GFLOPS
+    std::cout << "Performance vs cuBLAS: " << gflops / 46106.15 * 100 << "%" << std::endl;
     std::cout << "GPU speedup over CPU: " << cpu_duration.count() / avg_time_ms << "x" << std::endl;
 
     // Clean up - use cudaFreeHost for pinned memory

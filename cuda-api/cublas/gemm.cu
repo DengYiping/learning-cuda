@@ -6,9 +6,11 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
-#define M 8192
-#define N 4096
-#define K 2048
+#define M 4096
+#define N 2048
+#define K 512
+#define NUM_ITERATIONS 10
+#define WARMUP_RUNS 1
 
 #define CHECK_CUDA(call) { \
     cudaError_t err = call; \
@@ -89,6 +91,12 @@ int main(int argc, char** argv) {
 
   // cuBLAS SGEMM
   float alpha = 1.0f, beta = 0.0f;
+  float milliseconds = 0;
+  double total_gflops_s = 0.0;
+  double avg_gflops_s = 0.0;
+  cudaEvent_t start, stop;
+  CHECK_CUDA(cudaEventCreate(&start));
+  CHECK_CUDA(cudaEventCreate(&stop));
 
   // cuBLAS are in column major. We can get around this using
   // A @ B = C => B.T @ A.T = C.T
@@ -102,6 +110,7 @@ int main(int argc, char** argv) {
   //                            const float           *B, int ldb,
   //                            const float           *beta,
   //                            float           *C, int ldc)
+  CHECK_CUDA(cudaEventRecord(start, 0));
   CHECK_CUBLAS(cublasSgemm(handle,
                            CUBLAS_OP_N,CUBLAS_OP_N,
                            N, // matrix's B's column
@@ -114,6 +123,29 @@ int main(int argc, char** argv) {
                            d_C, N // matrix's C's column
                            )
                );
+  CHECK_CUDA(cudaEventRecord(stop, 0));
+  CHECK_CUDA(cudaEventSynchronize(stop));
+  CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start, stop));
+
+  for (int i = 0; i < WARMUP_RUNS + NUM_ITERATIONS; ++i) {
+    CHECK_CUDA(cudaEventRecord(start, 0));
+    CHECK_CUBLAS(cublasSgemm(handle,
+                             CUBLAS_OP_N, CUBLAS_OP_N,
+                             N, M, K,
+                             &alpha,
+                             d_B, N,
+                             d_A, K,
+                             &beta,
+                             d_C, N));
+    CHECK_CUDA(cudaEventRecord(stop, 0));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+    CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start, stop));
+    if (i >= WARMUP_RUNS) {
+      total_gflops_s += (2.0 * M * N * K) / (milliseconds / 1000.0) / 1e9;
+    }
+  }
+  avg_gflops_s = total_gflops_s / NUM_ITERATIONS;
+
   CHECK_CUDA(cudaMemcpy(h_cublas_s, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost));
 
   // cuBLAS HGEMM - Allocate on heap instead of stack
@@ -142,7 +174,10 @@ int main(int argc, char** argv) {
 
   half alpha_h = __float2half(1.0f);
   half beta_h = __float2half(0.0f);
+  double total_gflops_h = 0.0;
+  double avg_gflops_h = 0.0;
 
+  CHECK_CUDA(cudaEventRecord(start, 0));
   CHECK_CUBLAS(cublasHgemm(handle,
                            CUBLAS_OP_N,CUBLAS_OP_N,
                            N, // matrix's B's column
@@ -155,6 +190,28 @@ int main(int argc, char** argv) {
                            d_C_h, N // matrix's C's column
                            )
                );
+  CHECK_CUDA(cudaEventRecord(stop, 0));
+  CHECK_CUDA(cudaEventSynchronize(stop));
+
+  for (int i = 0; i < WARMUP_RUNS + NUM_ITERATIONS; ++i) {
+    CHECK_CUDA(cudaEventRecord(start, 0));
+    CHECK_CUBLAS(cublasHgemm(handle,
+                             CUBLAS_OP_N, CUBLAS_OP_N,
+                             N, M, K,
+                             &alpha_h,
+                             d_B_h, N,
+                             d_A_h, K,
+                             &beta_h,
+                             d_C_h, N));
+    CHECK_CUDA(cudaEventRecord(stop, 0));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+    CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start, stop));
+    if (i >= WARMUP_RUNS) {
+      total_gflops_h += (2.0 * M * N * K) / (milliseconds / 1000.0) / 1e9;
+    }
+  }
+  avg_gflops_h = total_gflops_h / NUM_ITERATIONS;
+
   CHECK_CUDA(cudaMemcpy(h_C_h, d_C_h, M * N * sizeof(half), cudaMemcpyDeviceToHost));
 
   // convert half to float
@@ -191,6 +248,8 @@ int main(int argc, char** argv) {
   // cublasGemmEx with bfloat16
   alpha = 1.0f;
   beta = 0.0f;
+  double total_gflops_bf16 = 0.0;
+  double avg_gflops_bf16 = 0.0;
 
   // cublasStatus_t cublasGemmEx(cublasHandle_t handle,
   //                           cublasOperation_t transa, cublasOperation_t transb,
@@ -202,6 +261,7 @@ int main(int argc, char** argv) {
   //                           void *C, cudaDataType_t Ctype, int ldc,
   //                           cudaDataType_t computeType,
   //                           cublasGemmAlgo_t algo)
+  CHECK_CUDA(cudaEventRecord(start, 0));
   CHECK_CUBLAS(cublasGemmEx(handle,
                            CUBLAS_OP_N, CUBLAS_OP_N,
                            N, // matrix B's column
@@ -214,6 +274,29 @@ int main(int argc, char** argv) {
                            d_C_bf16, CUDA_R_32F, N, // matrix C's column
                            CUBLAS_COMPUTE_32F,
                            CUBLAS_GEMM_DEFAULT));
+  CHECK_CUDA(cudaEventRecord(stop, 0));
+  CHECK_CUDA(cudaEventSynchronize(stop));
+
+  for (int i = 0; i < WARMUP_RUNS + NUM_ITERATIONS; ++i) {
+    CHECK_CUDA(cudaEventRecord(start, 0));
+    CHECK_CUBLAS(cublasGemmEx(handle,
+                             CUBLAS_OP_N, CUBLAS_OP_N,
+                             N, M, K,
+                             &alpha,
+                             d_B_bf16, CUDA_R_16BF, N,
+                             d_A_bf16, CUDA_R_16BF, K,
+                             &beta,
+                             d_C_bf16, CUDA_R_32F, N,
+                             CUBLAS_COMPUTE_32F,
+                             CUBLAS_GEMM_DEFAULT));
+    CHECK_CUDA(cudaEventRecord(stop, 0));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+    CHECK_CUDA(cudaEventElapsedTime(&milliseconds, start, stop));
+    if (i >= WARMUP_RUNS) {
+      total_gflops_bf16 += (2.0 * M * N * K) / (milliseconds / 1000.0) / 1e9;
+    }
+  }
+  avg_gflops_bf16 = total_gflops_bf16 / NUM_ITERATIONS;
 
   CHECK_CUDA(cudaMemcpy(h_cublas_bf16, d_C_bf16, M * N * sizeof(float), cudaMemcpyDeviceToHost));
 
@@ -222,10 +305,13 @@ int main(int argc, char** argv) {
   PRINT_MATRIX(h_cpu, 3, 3);
   printf("cuBLAS SGEMM result:\n");
   PRINT_MATRIX(h_cublas_s, M, N);
+  printf("Avg SGEMM GFLOPS (%d iterations): %.2f\n\n", NUM_ITERATIONS, avg_gflops_s);
   printf("cuBLAS HGEMM result:\n");
   PRINT_MATRIX(h_cublas_h, M, N);
+  printf("Avg HGEMM GFLOPS (%d iterations): %.2f\n\n", NUM_ITERATIONS, avg_gflops_h);
   printf("cuBLAS GemmEx with BF16 result:\n");
   PRINT_MATRIX(h_cublas_bf16, M, N);
+  printf("Avg BF16 GemmEx GFLOPS (%d iterations): %.2f\n\n", NUM_ITERATIONS, avg_gflops_bf16);
 
   // free the memory
   free(A);
@@ -249,6 +335,8 @@ int main(int argc, char** argv) {
   CHECK_CUDA(cudaFree(d_B_bf16));
   CHECK_CUDA(cudaFree(d_C_bf16));
   CHECK_CUBLAS(cublasDestroy(handle));
+  CHECK_CUDA(cudaEventDestroy(start));
+  CHECK_CUDA(cudaEventDestroy(stop));
 
   return 0;
 }
