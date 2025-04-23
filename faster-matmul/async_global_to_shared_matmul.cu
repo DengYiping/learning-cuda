@@ -73,7 +73,6 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
 
         // Wait until the tile is fully available in shared memory
         pipe.consumer_wait();
-        block.sync();
 
         /* ------------------------------------------------------------------
            At this point the entire tile is in shared memory and can be
@@ -87,6 +86,7 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
         const float* next_A = A + BK;
         const float* next_B = B + BK * N;
 
+        block.sync();
         // Perform matrix multiplication for this tile
         for (uint dot_idx = 0; dot_idx < BK; ++dot_idx) {
             // Load one column of A and one row of B from shared memory into
@@ -108,13 +108,13 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
             }
         }
 
+        block.sync();
         // We finished consuming this tile;  let the pipeline know.
         pipe.consumer_release();
 
         // Move on to the next tile in global memory
         A = next_A;
         B = next_B;
-        block.sync();
     }
 
     // Store the results
@@ -127,8 +127,8 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
 
 // Kernel launcher function
 void launch_vectorized_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
-    constexpr int BM = 64;
-    constexpr int BN = 128;
+    constexpr int BM = 128;
+    constexpr int BN = 64;
     constexpr int BK = 64;
     constexpr int TM = 8;
     constexpr int TN = 4;
@@ -143,8 +143,8 @@ void launch_vectorized_2d_block_tiling_matmul(const float* __restrict__ d_A, con
 }
 
 int main() {
-    constexpr int BM = 64;
-    constexpr int BN = 128;
+    constexpr int BM = 128;
+    constexpr int BN = 64;
     constexpr int BK = 64;
     constexpr int TM = 8;
     constexpr int TN = 4;
