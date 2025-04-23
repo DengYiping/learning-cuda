@@ -143,7 +143,7 @@ void launch_vectorized_2d_block_tiling_matmul(const float* __restrict__ d_A, con
 }
 
 int main() {
-    constexpr int BM = 128;
+    constexpr int BM = 64;
     constexpr int BN = 64;
     constexpr int BK = 64;
     constexpr int TM = 8;
