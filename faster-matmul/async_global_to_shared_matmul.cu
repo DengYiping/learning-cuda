@@ -78,7 +78,7 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
         /* ------------------------------------------------------------------
            At this point the entire tile is in shared memory and can be
            consumed by all threads.  The copy from global memory was issued
-           asynchronously;  with larger K‑tiles the latency will largely be
+           asynchronously;  with larger K-tiles the latency will largely be
            hidden behind the arithmetic below while we keep shared memory
            usage unchanged (no double buffering).
         ------------------------------------------------------------------ */
@@ -90,7 +90,7 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
         // Perform matrix multiplication for this tile
         for (uint dot_idx = 0; dot_idx < BK; ++dot_idx) {
             // Load one column of A and one row of B from shared memory into
-            // registers and compute a TM × TN outer product.
+            // registers and compute a TM x TN outer product.
 
             for (uint i = 0; i < TM; ++i) {
                 reg_M[i] = shared_A[(thread_row * TM + i) * BK + dot_idx];
@@ -173,13 +173,13 @@ int main() {
     int m = 4096; // Matrix A: m x k
     int n = 2048; // Matrix B: k x n, Matrix C: m x n
     int k = 512;
-    
+
     std::cout << "Running Vectorized 2D block tiling matrix multiplication benchmark:" << std::endl;
-    
+
     // Run the benchmark with the naive matrix multiplication kernel
     float avg_time = run_benchmark<float>(
         launch_vectorized_2d_block_tiling_matmul, m, n, k
     );
-    
+
     return 0;
 }
