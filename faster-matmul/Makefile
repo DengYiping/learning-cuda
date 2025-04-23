@@ -1,7 +1,7 @@
 NVCC = nvcc
 NVCCFLAGS = -O3 -std=c++20 -arch=sm_90 -Xcompiler -Wall,-Wextra --generate-line-info
 
-all: naive_matmul coalesced_matmul sram_matmul 1d_block_tiling_matmul 2d_block_tiling_matmul vectorized_2d_block_tiling_matmul double_buffering_matmul
+all: naive_matmul coalesced_matmul sram_matmul 1d_block_tiling_matmul 2d_block_tiling_matmul vectorized_2d_block_tiling_matmul double_buffering_matmul async_global_to_shared_matmul
 
 naive_matmul: naive_matmul.cu
 	$(NVCC) $(NVCCFLAGS) naive_matmul.cu -o naive_matmul
@@ -45,8 +45,14 @@ double_buffering_matmul: double_buffering_matmul.cu
 double_buffering_matmul_profiling: double_buffering_matmul
 	ncu -f -o double_buffering_matmul_report --set full ./double_buffering_matmul
 
+async_global_to_shared_matmul: async_global_to_shared_matmul.cu
+	$(NVCC) $(NVCCFLAGS) async_global_to_shared_matmul.cu -o async_global_to_shared_matmul
+
+async_global_to_shared_matmul_profiling: async_global_to_shared_matmul
+	ncu -f -o async_global_to_shared_matmul_report --set full ./async_global_to_shared_matmul
+
 clean:
-	rm -f naive_matmul coalesced_matmul sram_matmul 1d_block_tiling_matmul 2d_block_tiling_matmul vectorized_2d_block_tiling_matmul double_buffering_matmul
+	rm -f naive_matmul coalesced_matmul sram_matmul 1d_block_tiling_matmul 2d_block_tiling_matmul vectorized_2d_block_tiling_matmul double_buffering_matmul async_global_to_shared_matmul
 	rm -f naive_matmul_report.ncu-rep coalesced_matmul_report.ncu-rep sram_matmul_report.ncu-rep 1d_block_tiling_matmul_report.ncu-rep 2d_block_tiling_matmul_report.ncu-rep vectorized_2d_block_tiling_matmul_report.ncu-rep double_buffering_matmul_report.ncu-rep
 
 .PHONY: all clean benchmark
