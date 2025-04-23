@@ -59,6 +59,6 @@ tma_async_matmul_profiling: tma_async_matmul
 
 clean:
 	rm -f naive_matmul coalesced_matmul sram_matmul 1d_block_tiling_matmul 2d_block_tiling_matmul vectorized_2d_block_tiling_matmul double_buffering_matmul async_global_to_shared_matmul tma_async_matmul
-	rm -f naive_matmul_report.ncu-rep coalesced_matmul_report.ncu-rep sram_matmul_report.ncu-rep 1d_block_tiling_matmul_report.ncu-rep 2d_block_tiling_matmul_report.ncu-rep vectorized_2d_block_tiling_matmul_report.ncu-rep double_buffering_matmul_report.ncu-rep tma_async_matmul_report.ncu-rep
+	rm -f naive_matmul_report.ncu-rep coalesced_matmul_report.ncu-rep sram_matmul_report.ncu-rep 1d_block_tiling_matmul_report.ncu-rep 2d_block_tiling_matmul_report.ncu-rep vectorized_2d_block_tiling_matmul_report.ncu-rep double_buffering_matmul_report.ncu-rep async_global_to_shared_matmul_report.ncu-rep tma_async_matmul_report.ncu-rep
 
 .PHONY: all clean benchmark

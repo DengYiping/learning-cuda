@@ -56,15 +56,16 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
         ------------------------------------------------------------------ */
 
         // Calculate total bytes to be copied in this iteration.
-        const size_t bytes_A_tile = BM * BK * sizeof(float);
-        const size_t bytes_B_tile = BK * BN * sizeof(float);
-        const size_t total_bytes = bytes_A_tile + bytes_B_tile;
+        constexpr size_t bytes_A_tile = BM * BK * sizeof(float);
+        constexpr size_t bytes_B_tile = BK * BN * sizeof(float);
+        constexpr size_t total_bytes = bytes_A_tile + bytes_B_tile;
 
         // Master thread initiates all copies and arrives once with expect_tx.
         if (is_master_thread) {
             // Initiate A tile copy (row by row)
+            #pragma unroll
             for (uint i = 0; i < BM; i++) {
-                size_t bytes_to_copy = BK * sizeof(float);
+                constexpr size_t bytes_to_copy = BK * sizeof(float);
                  ptx::cp_async_bulk_tensor_1d_global_to_shared(
                     reinterpret_cast<uint64_t*>(shared_A + i * BK),
                     reinterpret_cast<const uint64_t*>(A + i * K),
@@ -73,8 +74,9 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
                 );
             }
             // Initiate B tile copy (row by row)
+            #pragma unroll
              for (uint i = 0; i < BK; i++) {
-                 size_t bytes_to_copy = BN * sizeof(float);
+                 constexpr size_t bytes_to_copy = BN * sizeof(float);
                  ptx::cp_async_bulk_tensor_1d_global_to_shared(
                     reinterpret_cast<uint64_t*>(shared_B + i * BN),
                     reinterpret_cast<const uint64_t*>(B + i * N),
