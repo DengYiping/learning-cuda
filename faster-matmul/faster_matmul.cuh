@@ -1,3 +1,6 @@
+#ifndef FASTER_MATMUL_CUH_
+#define FASTER_MATMUL_CUH_
+
 #include <iostream>
 #include <iomanip>
 #include <cuda_runtime.h>
@@ -357,3 +360,5 @@ float run_benchmark(
     
     return avg_time_ms;
 }
+
+#endif // FASTER_MATMUL_CUH_
