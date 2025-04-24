@@ -33,8 +33,8 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tilin
     float* shared_A = reinterpret_cast<float*>(smem_buffer);
     float* shared_B = shared_A + BM * BK;
 
-    const uint thread_col = threadIdx.x % (BN / TN);
-    const uint thread_row = threadIdx.x / (BN / TN);
+    const uint thread_col = threadIdx.x % (BN / TN); // 0 ... BN / TN - 1
+    const uint thread_row = threadIdx.x / (BN / TN); // 0 ... BM / TM - 1
 
     // Adjust C pointer for the current block
     float* C_block_start = C + blockIdx.y * BM * N + blockIdx.x * BN;
