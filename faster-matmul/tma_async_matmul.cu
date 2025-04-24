@@ -2,138 +2,134 @@
 #include "faster_matmul.cuh"
 #include <cooperative_groups.h>
 #include "ptx.cuh"
+#include <cuda.h> // Include CUDA Driver API header
+#include <stdio.h> // For printf debugging
 
 #define CEIL_DIV(M, N) (((M) + (N) - 1) / (N))
 namespace cg = cooperative_groups;
 
+// Helper macro for CUDA Driver API error checking
+#define CHECK_CUDA_DRIVER(call) do { \
+    CUresult err = call; \
+    if (err != CUDA_SUCCESS) { \
+        const char *err_str; \
+        cuGetErrorString(err, &err_str); \
+        fprintf(stderr, "CUDA Driver error in %s at line %d: %s\n", __FILE__, __LINE__, err_str); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
 template <int BM, int BN, int BK, int TM, int TN>
-__global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int M, const int N, const int K) {
-    extern __shared__ float shared_A[];
+__global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tiling_matmul(
+    const __grid_constant__ CUtensorMap tensor_map_A, // Pass by value with __grid_constant__
+    const __grid_constant__ CUtensorMap tensor_map_B, // Pass by value with __grid_constant__
+    float* __restrict__ C,
+    const int M, const int N, const int K)
+{
+    // Define aligned shared memory
+    alignas(128) extern __shared__ char smem_buffer[]; // Use char for byte-level layout, align to 16 bytes
+
+    // Derive float pointers from the aligned buffer
+    float* shared_A = reinterpret_cast<float*>(smem_buffer);
     float* shared_B = shared_A + BM * BK;
 
-    // blockIdx.x is the block id in the N dimension, aka the column index of the block
-    // blockIdx.y is the block id in the M dimension, aka the row index of the block
-
-    // Each warp will calculate 32 * TM * TN elements, with 32 being the columnar dim.
-    // Num threads = BM * BN / (TM * TN), we will 2d tiling on the M, N dimension.
     const uint thread_col = threadIdx.x % (BN / TN);
     const uint thread_row = threadIdx.x / (BN / TN);
 
-    // Move blocktile to beginning of A's row and B's column
-    A += blockIdx.y * BM * K;
-    B += blockIdx.x * BN;
-    C += blockIdx.y * BM * N + blockIdx.x * BN;
+    // Adjust C pointer for the current block
+    float* C_block_start = C + blockIdx.y * BM * N + blockIdx.x * BN;
 
-    float thread_results[TM][TN] = {0.0f};
-    float reg_M[TM];
-    float reg_N[TN];
+    alignas(16) float thread_results[TM][TN] = {0.0f};
+    alignas(16) float reg_M[TM];
+    alignas(16) float reg_N[TN];
 
-    // ------------------------- PTX Asynchronous copy setup -------------------------
+    // PTX Asynchronous copy setup
     auto block = cg::this_thread_block();
     const bool is_master_thread = (block.thread_rank() == 0);
     constexpr int THREADS_PER_BLOCK = BM * BN / (TM * TN);
 
-    // Allocate shared memory for the mbarrier (only need 1 barrier).
-    __shared__ uint64_t mbar[1];
+    alignas(8) __shared__ uint64_t mbar[1];
 
-    // Initialize the mbarrier from thread 0.
     if (is_master_thread) {
         ptx::mbarrier_init(&mbar[0], THREADS_PER_BLOCK);
-        // Fence to ensure initialization is visible to async copy units.
-        ptx::fence_mbarrier_init_release_cluster();
+        ptx::fence_mbarrier_init_release_cluster(); // Ensure init is visible to async units
     }
-    // Sync all threads to ensure barrier is initialized before use.
-    block.sync();
+    block.sync(); // Ensure barrier is initialized before use
 
-    // Phase variable for mbarrier wait cycles.
-    uint32_t phase = 0;
+    uint32_t phase = 0; // Phase for mbarrier wait cycles
 
-    // Assume K is divisible by BK. Outer loop is over block tiles
+    // Outer loop over block tiles in K dimension
     for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
-        /* ------------------------------------------------------------------
-           Load the next A/B tile from global memory to shared memory using
-           ptx::cp_async_bulk_tensor_1d_global_to_shared.
-        ------------------------------------------------------------------ */
-
-        // Calculate total bytes to be copied in this iteration.
+        // Load the next A/B tile from global memory to shared memory using TMA
         constexpr size_t bytes_A_tile = BM * BK * sizeof(float);
         constexpr size_t bytes_B_tile = BK * BN * sizeof(float);
         constexpr size_t total_bytes = bytes_A_tile + bytes_B_tile;
 
-        // Master thread initiates all copies and arrives once with expect_tx.
+        // Calculate 2D offsets for TMA
+        const uint32_t offset_A_x = bkIdx;
+        const uint32_t offset_A_y = blockIdx.y * BM;
+        const uint32_t offset_B_x = blockIdx.x * BN;
+        const uint32_t offset_B_y = bkIdx;
+
         if (is_master_thread) {
-            // Initiate A tile copy (row by row)
-            #pragma unroll
-            for (uint i = 0; i < BM; i++) {
-                constexpr size_t bytes_to_copy = BK * sizeof(float);
-                 ptx::cp_async_bulk_tensor_1d_global_to_shared(
-                    reinterpret_cast<uint64_t*>(shared_A + i * BK),
-                    reinterpret_cast<const uint64_t*>(A + i * K),
-                    bytes_to_copy,
-                    &mbar[0]
-                );
-            }
-            // Initiate B tile copy (row by row)
-            #pragma unroll
-             for (uint i = 0; i < BK; i++) {
-                 constexpr size_t bytes_to_copy = BN * sizeof(float);
-                 ptx::cp_async_bulk_tensor_1d_global_to_shared(
-                    reinterpret_cast<uint64_t*>(shared_B + i * BN),
-                    reinterpret_cast<const uint64_t*>(B + i * N),
-                    bytes_to_copy,
-                    &mbar[0]
-                );
-            }
-            // Master thread arrives, indicating total expected bytes for this phase.
+            // Initiate A tile copy (TMA)
+            ptx::cp_async_bulk_tensor_2d_global_to_shared(
+                reinterpret_cast<uint64_t*>(shared_A),
+                (const uint64_t*)&tensor_map_A,
+                offset_A_x, offset_A_y,
+                &mbar[0]
+            );
+            // Initiate B tile copy (TMA)
+            ptx::cp_async_bulk_tensor_2d_global_to_shared(
+                reinterpret_cast<uint64_t*>(shared_B),
+                (const uint64_t*)&tensor_map_B,
+                offset_B_x, offset_B_y,
+                &mbar[0]
+            );
             ptx::mbarrier_arrive_expect_tx(&mbar[0], total_bytes);
         } else {
-            // Other threads just arrive.
             ptx::mbarrier_arrive(&mbar[0]);
         }
 
-        // Wait for all threads to arrive and for the async copies (total_bytes) to complete.
+        // Wait for TMA copies to complete
         ptx::mbarrier_wait_parity(&mbar[0], phase);
 
-        /* ------------------------------------------------------------------
-           At this point the entire tile is in shared memory and can be
-           consumed by all threads.
-        ------------------------------------------------------------------ */
-
         // Perform matrix multiplication for this tile
+        #pragma unroll
         for (uint dot_idx = 0; dot_idx < BK; ++dot_idx) {
-            // Load one column of A and one row of B from shared memory into
-            // registers and compute a TM x TN outer product.
-
+            // Load column of A and row of B into registers
+            #pragma unroll
             for (uint i = 0; i < TM; ++i) {
                 reg_M[i] = shared_A[(thread_row * TM + i) * BK + dot_idx];
             }
-
+            #pragma unroll
             for (uint j = 0; j < TN; j += 4) {
                 reinterpret_cast<float4*>(&reg_N[j])[0] =
-                    reinterpret_cast<float4*>(&shared_B[dot_idx * BN + (thread_col * TN + j)])[0];
+                    reinterpret_cast<const float4*>(&shared_B[dot_idx * BN + (thread_col * TN + j)])[0];
             }
 
+            // Compute outer product and accumulate
+            #pragma unroll
             for (uint i = 0; i < TM; ++i) {
+                #pragma unroll
                 for (uint j = 0; j < TN; ++j) {
                     thread_results[i][j] += reg_M[i] * reg_N[j];
                 }
             }
         }
-        // Sync threads before starting next K-tile iteration (ensures shared memory is ready for next load).
-        block.sync();
 
-        // Move on to the next tile in global memory
-        A += BK;
-        B += BK * N;
+        block.sync(); // Ensure shared mem reads finish before next K-tile TMA overwrite
 
-        // Flip the phase for the next mbarrier wait.
-        phase ^= 1;
+        phase ^= 1; // Flip phase for next mbarrier wait
     }
 
     // Store the results
+    #pragma unroll
     for (uint i = 0; i < TM; i++) {
+        #pragma unroll
         for (uint j = 0; j < TN; j+= 4) {
-            reinterpret_cast<float4*>(&C[(thread_row * TM + i) * N + (thread_col * TN + j)])[0] = reinterpret_cast<float4*>(&thread_results[i][j])[0];
+             uint write_idx_base = (thread_row * TM + i) * N + (thread_col * TN + j);
+             reinterpret_cast<float4*>(&C_block_start[write_idx_base])[0] = reinterpret_cast<float4*>(&thread_results[i][j])[0];
         }
     }
 }
@@ -146,19 +142,67 @@ void launch_vectorized_2d_block_tiling_matmul(const float* __restrict__ d_A, con
     constexpr int TM = 4;
     constexpr int TN = 4;
 
-    // Each thread will calculate TM * TN elements
-    dim3 blockDim(BM * BN / (TM * TN)); 
-    // Reversing order to optimize L2 cache access. Grid will move on the N dimension fast and M dimension slow.
-    // With row-major layout, this is more cache-friendly.
+    // Create Tensor Maps
+    CUtensorMap tensor_map_A;
+    CUtensorMap tensor_map_B;
+
+    const cuuint32_t elementStrides[] = {1, 1}; // Contiguous access
+
+    // Tensor A (M x K) -> {inner (K), outer (M)}
+    const uint64_t globalDimA[] = {(uint64_t)k, (uint64_t)m};
+    const uint64_t globalStrideA[] = {sizeof(float), (uint64_t)k * sizeof(float)};
+    const cuuint32_t boxDimA[] = {BK, BM};
+
+    CHECK_CUDA_DRIVER(cuTensorMapEncodeTiled(
+        &tensor_map_A,
+        CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
+        2,
+        (void*)d_A,
+        globalDimA,
+        globalStrideA + 1,
+        boxDimA,
+        elementStrides,
+        CU_TENSOR_MAP_INTERLEAVE_NONE,
+        CU_TENSOR_MAP_SWIZZLE_NONE,
+        CU_TENSOR_MAP_L2_PROMOTION_NONE,
+        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    ));
+
+    // Tensor B (K x N) -> {inner (N), outer (K)}
+    const uint64_t globalDimB[] = {(uint64_t)n, (uint64_t)k};
+    const uint64_t globalStrideB[] = {sizeof(float), (uint64_t)n * sizeof(float)};
+    const cuuint32_t boxDimB[] = {BN, BK};
+
+    CHECK_CUDA_DRIVER(cuTensorMapEncodeTiled(
+        &tensor_map_B,
+        CU_TENSOR_MAP_DATA_TYPE_FLOAT32,
+        2,
+        (void*)d_B,
+        globalDimB,
+        globalStrideB + 1,
+        boxDimB,
+        elementStrides,
+        CU_TENSOR_MAP_INTERLEAVE_NONE,
+        CU_TENSOR_MAP_SWIZZLE_NONE,
+        CU_TENSOR_MAP_L2_PROMOTION_NONE,
+        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    ));
+
+    dim3 blockDim(BM * BN / (TM * TN));
     dim3 gridDim(CEIL_DIV(n, BN), CEIL_DIV(m, BM));
-    
-    vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN><<<gridDim, blockDim, BM * BK * sizeof(float) + BN * BK * sizeof(float), stream>>>(d_A, d_B, d_C, m, n, k);
+    size_t shared_mem_size = (BM * BK + BK * BN) * sizeof(float);
+
+    vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN><<<gridDim, blockDim, shared_mem_size, stream>>>(
+        tensor_map_A,
+        tensor_map_B,
+        d_C, m, n, k);
 }
 
-
-
-
 int main() {
+    CHECK_CUDA_DRIVER(cuInit(0));
+    CUcontext ctx;
+    CHECK_CUDA_DRIVER(cuCtxGetCurrent(&ctx));
+
     constexpr int BM = 64;
     constexpr int BN = 128;
     constexpr int BK = 64;
@@ -168,31 +212,31 @@ int main() {
     cudaDeviceProp deviceProp;
     CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, 0));
     std::cout << "Device name: " << deviceProp.name << std::endl;
-    std::cout << "Shared memory size: " << deviceProp.sharedMemPerMultiprocessor << std::endl;
     std::cout << "Shared memory size per block: " << deviceProp.sharedMemPerBlock << std::endl;
 
-
-    // Set shared memory carveout for this kernel
+    // Set kernel attributes (carveout preference, max dynamic shared memory)
     CHECK_CUDA(cudaFuncSetAttribute(
-        vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN>,
+        (const void*)vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN>,
         cudaFuncAttributePreferredSharedMemoryCarveout,
-        75
+        cudaSharedmemCarveoutMaxShared
     ));
-    // Set shared memory size for this kernel
-    CHECK_CUDA(cudaFuncSetAttribute(
-        vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        128 * 1024
-    ));
+     size_t shared_mem_size = (BM * BK + BK * BN) * sizeof(float);
+     if (shared_mem_size > deviceProp.sharedMemPerBlock) {
+         std::cerr << "Warning: Requested shared memory (" << shared_mem_size << ") exceeds device limit (" << deviceProp.sharedMemPerBlock << ")" << std::endl;
+     }
+     CHECK_CUDA(cudaFuncSetAttribute(
+         (const void*)vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN>,
+         cudaFuncAttributeMaxDynamicSharedMemorySize,
+         shared_mem_size
+     ));
 
     // Default matrix dimensions
-    int m = 4096; // Matrix A: m x k
-    int n = 2048; // Matrix B: k x n, Matrix C: m x n
+    int m = 4096;
+    int n = 2048;
     int k = 512;
 
-    std::cout << "Running Vectorized 2D block tiling matrix multiplication benchmark:" << std::endl;
+    std::cout << "Running Vectorized 2D block tiling (TMA with TensorMap) matrix multiplication benchmark:" << std::endl;
 
-    // Run the benchmark with the naive matrix multiplication kernel
     float avg_time = run_benchmark<float>(
         launch_vectorized_2d_block_tiling_matmul, m, n, k
     );
