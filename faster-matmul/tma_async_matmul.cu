@@ -7,7 +7,7 @@
 namespace cg = cooperative_groups;
 
 template <int BM, int BN, int BK, int TM, int TN>
-__global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int M, const int N, const int K) {
+__global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int M, const int N, const int K) {
     extern __shared__ float shared_A[];
     float* shared_B = shared_A + BM * BK;
 
@@ -94,17 +94,10 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
         // Wait for all threads to arrive and for the async copies (total_bytes) to complete.
         ptx::mbarrier_wait_parity(&mbar[0], phase);
 
-        // Sync threads after wait to ensure shared memory writes are visible.
-        block.sync();
-
         /* ------------------------------------------------------------------
            At this point the entire tile is in shared memory and can be
            consumed by all threads.
         ------------------------------------------------------------------ */
-
-        // Advance global pointers so that they point at the *next* tile in K
-        const float* next_A = A + BK;
-        const float* next_B = B + BK * N;
 
         // Perform matrix multiplication for this tile
         for (uint dot_idx = 0; dot_idx < BK; ++dot_idx) {
@@ -130,8 +123,8 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
         block.sync();
 
         // Move on to the next tile in global memory
-        A = next_A;
-        B = next_B;
+        A += BK;
+        B += BK * N;
 
         // Flip the phase for the next mbarrier wait.
         phase ^= 1;
@@ -147,10 +140,10 @@ __global__ void vectorized_2d_block_tiling_matmul(const float* __restrict__ A, c
 
 // Kernel launcher function
 void launch_vectorized_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
-    constexpr int BM = 128;
-    constexpr int BN = 64;
+    constexpr int BM = 64;
+    constexpr int BN = 128;
     constexpr int BK = 64;
-    constexpr int TM = 8;
+    constexpr int TM = 4;
     constexpr int TN = 4;
 
     // Each thread will calculate TM * TN elements
@@ -166,10 +159,10 @@ void launch_vectorized_2d_block_tiling_matmul(const float* __restrict__ d_A, con
 
 
 int main() {
-    constexpr int BM = 128;
-    constexpr int BN = 64;
+    constexpr int BM = 64;
+    constexpr int BN = 128;
     constexpr int BK = 64;
-    constexpr int TM = 8;
+    constexpr int TM = 4;
     constexpr int TN = 4;
 
     cudaDeviceProp deviceProp;
