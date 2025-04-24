@@ -137,9 +137,9 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tilin
 // Kernel launcher function
 void launch_vectorized_2d_block_tiling_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
     constexpr int BM = 64;
-    constexpr int BN = 128;
+    constexpr int BN = 64;
     constexpr int BK = 64;
-    constexpr int TM = 4;
+    constexpr int TM = 8;
     constexpr int TN = 4;
 
     // Create Tensor Maps
@@ -204,9 +204,9 @@ int main() {
     CHECK_CUDA_DRIVER(cuCtxGetCurrent(&ctx));
 
     constexpr int BM = 64;
-    constexpr int BN = 128;
+    constexpr int BN = 64;
     constexpr int BK = 64;
-    constexpr int TM = 4;
+    constexpr int TM = 8;
     constexpr int TN = 4;
 
     cudaDeviceProp deviceProp;
