@@ -10,7 +10,7 @@ from typing import List, Tuple, Optional, Dict
 
 # --- Configuration ---
 NVCC_PATH = "nvcc"  # Or specify the full path if not in PATH
-NVCC_FLAGS = ["-O3", "-arch=sm_90"]
+NVCC_FLAGS = ["-O3", "-arch=sm_90", "-lcuda"]
 EXECUTABLE_NAME = "temp_matmul_exec"
 
 # Parameter ranges (adjust as needed)
