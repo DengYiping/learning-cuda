@@ -212,17 +212,17 @@ int main() {
     cudaDeviceProp deviceProp;
     CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, 0));
     std::cout << "Device name: " << deviceProp.name << std::endl;
-    std::cout << "Shared memory size per block: " << deviceProp.sharedMemPerBlock << std::endl;
+    std::cout << "Shared memory size per block: " << deviceProp.sharedMemPerMultiprocessor << std::endl;
 
     // Set kernel attributes (carveout preference, max dynamic shared memory)
     CHECK_CUDA(cudaFuncSetAttribute(
         (const void*)vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN>,
         cudaFuncAttributePreferredSharedMemoryCarveout,
-        cudaSharedmemCarveoutMaxShared
+        90 // 90% of the shared memory per block
     ));
      size_t shared_mem_size = (BM * BK + BK * BN) * sizeof(float);
-     if (shared_mem_size > deviceProp.sharedMemPerBlock) {
-         std::cerr << "Warning: Requested shared memory (" << shared_mem_size << ") exceeds device limit (" << deviceProp.sharedMemPerBlock << ")" << std::endl;
+     if (shared_mem_size > deviceProp.sharedMemPerMultiprocessor) {
+         std::cerr << "Warning: Requested shared memory (" << shared_mem_size << ") exceeds device limit (" << deviceProp.sharedMemPerMultiprocessor << ")" << std::endl;
      }
      CHECK_CUDA(cudaFuncSetAttribute(
          (const void*)vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN>,
