@@ -150,7 +150,7 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
                 ptx::mbarrier_arrive_expect_tx(mbar, total_bytes_per_stage);
             } else {
                 // Other threads just arrive for the next phase's copy.
-                ptx::mbarrier_arrive(&mbar[0]);
+                ptx::mbarrier_arrive(mbar);
             }
             // Note: Global A/B pointers are not advanced here as TensorMap handles addressing
         }
@@ -202,14 +202,15 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
             }
         }
 
-        // Toggle read_stage to the buffer we just finished copying (and will read next)
-        write_stage ^= 1;
-        // Flip the phase for the next mbarrier wait.
-        phase ^= 1;
         // Sync threads before next iteration to ensure computation is finished before
         // potentially overwriting the shared memory buffer in the next copy phase.
         // Also ensures all threads have updated phase/read_stage.
         block.sync();
+
+        // Toggle read_stage to the buffer we just finished copying (and will read next)
+        write_stage ^= 1;
+        // Flip the phase for the next mbarrier wait.
+        phase ^= 1;
     }
 
     // At this point, all tiles have been processed and results are in thread_results.
