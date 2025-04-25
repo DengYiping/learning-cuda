@@ -152,6 +152,29 @@ __device__ __forceinline__ void fence_proxy_async() { asm volatile("fence.proxy.
 __device__ __forceinline__ void fence_proxy_async_shared_cta() {
   asm volatile("fence.proxy.async.shared::cta;");
 }
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-prefetch-tensor
+// global -> L2 cache
+__device__ __forceinline__ void prefetch_async_bulk_tensor_1d_global_l2(
+    const uint64_t *tensor_map_ptr, const uint32_t offset) {
+  asm volatile(
+      "cp.async.bulk.prefetch.tensor.1d.L2.global.tile"
+      " [%0, {%1}];" ::"l"(tensor_map_ptr),
+      "r"(offset)
+      : "memory");
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-prefetch-tensor
+// global -> L2 cache
+__device__ __forceinline__ void prefetch_async_bulk_tensor_2d_global_l2(
+    const uint64_t *tensor_map_ptr, const uint32_t offset_x, const uint32_t offset_y) {
+  asm volatile(
+      "cp.async.bulk.prefetch.tensor.2d.L2.global.tile"
+      " [%0, {%1, %2}];" ::"l"(tensor_map_ptr),
+      "r"(offset_x), "r"(offset_y)
+      : "memory");
+}
+
 }  // namespace ptx
 
 namespace {

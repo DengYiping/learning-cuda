@@ -157,6 +157,18 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
                 );
                 // Master thread arrives, indicating total expected bytes for the next phase.
                 ptx::mbarrier_arrive_expect_tx(mbar, total_bytes_per_stage);
+                if (tile + 2 < num_tiles) {
+                    ptx::prefetch_async_bulk_tensor_2d_global_l2(
+                        (const uint64_t*)&tensor_map_A,
+                        next_offset_K + BK,
+                        base_offset_A_y
+                    );
+                    ptx::prefetch_async_bulk_tensor_2d_global_l2(
+                        (const uint64_t*)&tensor_map_B,
+                        base_offset_B_x,
+                        next_offset_K + BK
+                    );
+                }
             } else {
                 // Other threads just arrive for the next phase's copy.
                 ptx::mbarrier_arrive(mbar);
@@ -237,8 +249,8 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
 // Kernel launcher function
 void launch_tma_double_buffered_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
     // Use the best parameters found
-    constexpr int BM = 256;
-    constexpr int BN = 128;
+    constexpr int BM = 64;
+    constexpr int BN = 64;
     constexpr int BK = 32;
     constexpr int TM = 8;
     constexpr int TN = 4;
@@ -314,8 +326,8 @@ int main() {
     CHECK_CUDA_DRIVER(cuCtxGetCurrent(&ctx)); // Ensure context exists
 
     // Use the best parameters found
-    constexpr int BM = 256;
-    constexpr int BN = 128;
+    constexpr int BM = 64;
+    constexpr int BN = 64;
     constexpr int BK = 32;
     constexpr int TM = 8;
     constexpr int TN = 4;

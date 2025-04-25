@@ -40,7 +40,7 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tilin
     float* C_block_start = C + blockIdx.y * BM * N + blockIdx.x * BN;
 
     alignas(16) float thread_results[TM][TN] = {0.0f};
-    alignas(16) float reg_M[TM];
+    alignas(16) float reg_M[TM][4]; // we load 4 floats at a time
     alignas(16) float reg_N[TN];
 
     // PTX Asynchronous copy setup
@@ -87,6 +87,18 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tilin
                 &mbar[0]
             );
             ptx::mbarrier_arrive_expect_tx(&mbar[0], total_bytes);
+            if (bkIdx + BK < K) {
+                ptx::prefetch_async_bulk_tensor_2d_global_l2(
+                    (const uint64_t*)&tensor_map_A,
+                    offset_A_x + BK,
+                    offset_A_y
+                );
+                ptx::prefetch_async_bulk_tensor_2d_global_l2(
+                    (const uint64_t*)&tensor_map_B,
+                    offset_B_x,
+                    offset_B_y + BN
+                );
+            }
         } else {
             ptx::mbarrier_arrive(&mbar[0]);
         }
@@ -96,24 +108,28 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tilin
 
         // Perform matrix multiplication for this tile
         #pragma unroll
-        for (uint dot_idx = 0; dot_idx < BK; ++dot_idx) {
+        for (uint dot_idx = 0; dot_idx < BK / 4; ++dot_idx) {
             // Load column of A and row of B into registers
             #pragma unroll
             for (uint i = 0; i < TM; ++i) {
-                reg_M[i] = shared_A[(thread_row * TM + i) * BK + dot_idx];
-            }
-            #pragma unroll
-            for (uint j = 0; j < TN; j += 4) {
-                reinterpret_cast<float4*>(&reg_N[j])[0] =
-                    reinterpret_cast<const float4*>(&shared_B[dot_idx * BN + (thread_col * TN + j)])[0];
+                *reinterpret_cast<float4*>(reg_M[i]) = reinterpret_cast<const float4*>(&shared_A[(thread_row * TM + i) * BK + dot_idx * 4])[0];
             }
 
-            // Compute outer product and accumulate
             #pragma unroll
-            for (uint i = 0; i < TM; ++i) {
+            for (uint sub_dot_idx = 0; sub_dot_idx < 4; ++sub_dot_idx) {
                 #pragma unroll
-                for (uint j = 0; j < TN; ++j) {
-                    thread_results[i][j] += reg_M[i] * reg_N[j];
+                for (uint j = 0; j < TN; j += 4) {
+                    reinterpret_cast<float4*>(&reg_N[j])[0] =
+                        reinterpret_cast<const float4*>(&shared_B[(dot_idx * 4 + sub_dot_idx) * BN + (thread_col * TN + j)])[0];
+                }
+
+                // Compute outer product and accumulate
+                #pragma unroll
+                for (uint i = 0; i < TM; ++i) {
+                    #pragma unroll
+                    for (uint j = 0; j < TN; ++j) {
+                        thread_results[i][j] += reg_M[i][sub_dot_idx] * reg_N[j];
+                    }
                 }
             }
         }
