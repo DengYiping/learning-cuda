@@ -56,8 +56,9 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
     C += blockIdx.y * BM * N + blockIdx.x * BN;
 
     alignas(16) float thread_results[TM][TN] = {0.0f};
-    alignas(16) float reg_M[TM];
-    alignas(16) float reg_N[TN];
+    // Double buffer registers for M and N tiles
+    alignas(16) float reg_M[2][TM];
+    alignas(16) float reg_N[2][TN];
 
     // ------------------------- PTX Asynchronous copy setup -------------------------
     auto block = cg::this_thread_block();
@@ -66,19 +67,23 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
 
     // Initialize the mbarrier from thread 0.
     if (is_master_thread) {
-        ptx::mbarrier_init(&mbar[0], THREADS_PER_BLOCK);
+        ptx::mbarrier_init(mbar, THREADS_PER_BLOCK);
         // Fence to ensure initialization is visible to async copy units.
         ptx::fence_mbarrier_init_release_cluster();
     }
     // Sync all threads to ensure barrier is initialized before use.
     block.sync();
 
-    // Phase variable for mbarrier wait cycles.
+    // Phase variable for mbarrier wait cycles. Also used for read stage index.
     uint32_t phase = 0;
+    uint32_t write_stage = 0;
 
-    // Stage indices (ping-pong)
-    int write_stage = 0;
-    int read_stage = 0;
+    // Register stage indices for double buffering
+    int reg_read_stage = 0;
+    int reg_write_stage = 0;// will be toggled before first use
+
+    // --- Prime the register buffer for dot_idx = 0 ---
+    reg_write_stage ^= 1; // Now reg_write_stage = 1
 
     // Calculate total bytes per tile for A and B
     constexpr size_t bytes_A_tile = BM * BK * sizeof(float);
@@ -89,63 +94,60 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
     const uint32_t base_offset_A_y = blockIdx.y * BM;
     const uint32_t base_offset_B_x = blockIdx.x * BN;
 
+    // Offset for the next tile
+    uint32_t next_offset_K = 0;
+
     // ---------------- Prime the pipeline : load the very first tile using TMA ----------------
     if (is_master_thread) {
-        const uint32_t current_offset_A_x = 0; // First K-tile
-        const uint32_t current_offset_B_y = 0; // First K-tile
-
         // Initiate A tile copy (TMA 2D)
         ptx::cp_async_bulk_tensor_2d_global_to_shared(
             reinterpret_cast<uint64_t*>(smem_A[write_stage]),
             (const uint64_t*)&tensor_map_A,
-            current_offset_A_x, base_offset_A_y,
-            &mbar[0]
+            next_offset_K, base_offset_A_y,
+            mbar
         );
         // Initiate B tile copy (TMA 2D)
         ptx::cp_async_bulk_tensor_2d_global_to_shared(
             reinterpret_cast<uint64_t*>(smem_B[write_stage]),
             (const uint64_t*)&tensor_map_B,
-            base_offset_B_x, current_offset_B_y,
-            &mbar[0]
+            base_offset_B_x, next_offset_K,
+            mbar
         );
         // Master thread arrives, indicating total expected bytes for this phase.
-        ptx::mbarrier_arrive_expect_tx(&mbar[0], total_bytes_per_stage);
+        ptx::mbarrier_arrive_expect_tx(mbar, total_bytes_per_stage);
     } else {
         // Other threads just arrive.
-        ptx::mbarrier_arrive(&mbar[0]);
+        ptx::mbarrier_arrive(mbar);
     }
+    write_stage ^= 1;
 
     // number of K-tiles we will iterate over
     const uint num_tiles = CEIL_DIV(K, BK);
 
     for (uint tile = 0; tile < num_tiles; ++tile) {
+        next_offset_K += BK;
         // Wait for the copy initiated in the previous iteration (or priming phase) to complete.
-        ptx::mbarrier_wait_parity(&mbar[0], phase);
+        ptx::mbarrier_wait_parity(mbar, phase);
 
         // ---------------- Preload the next tile (if any) while computation continues ----------------
         if (tile + 1 < num_tiles) {
-            write_stage ^= 1; // toggle between 0 and 1
             if (is_master_thread) {
-                // Calculate offsets for the *next* tile
-                const uint32_t next_offset_A_x = (tile + 1) * BK;
-                const uint32_t next_offset_B_y = (tile + 1) * BK;
-
                  // Initiate A tile copy (TMA 2D) for the next tile
                 ptx::cp_async_bulk_tensor_2d_global_to_shared(
                     reinterpret_cast<uint64_t*>(smem_A[write_stage]),
                     (const uint64_t*)&tensor_map_A,
-                    next_offset_A_x, base_offset_A_y,
-                    &mbar[0]
+                    next_offset_K, base_offset_A_y,
+                    mbar
                 );
                 // Initiate B tile copy (TMA 2D) for the next tile
                  ptx::cp_async_bulk_tensor_2d_global_to_shared(
                     reinterpret_cast<uint64_t*>(smem_B[write_stage]),
                     (const uint64_t*)&tensor_map_B,
-                    base_offset_B_x, next_offset_B_y,
-                    &mbar[0]
+                    base_offset_B_x, next_offset_K,
+                    mbar
                 );
                 // Master thread arrives, indicating total expected bytes for the next phase.
-                ptx::mbarrier_arrive_expect_tx(&mbar[0], total_bytes_per_stage);
+                ptx::mbarrier_arrive_expect_tx(mbar, total_bytes_per_stage);
             } else {
                 // Other threads just arrive for the next phase's copy.
                 ptx::mbarrier_arrive(&mbar[0]);
@@ -154,35 +156,54 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
         }
 
         // Set up shared pointers for the tile we are about to compute on
-        const float* shared_A = smem_A[read_stage];
-        const float* shared_B = smem_B[read_stage];
+        const float* shared_A = smem_A[phase];
+        const float* shared_B = smem_B[phase];
 
         // ---------------- Matrix multiply on the current shared-memory tile ----------------
+
+        #pragma unroll
+        for (uint i = 0; i < TM; ++i) {
+             reg_M[reg_write_stage][i] = shared_A[(thread_row * TM + i) * BK + 0];
+        }
+        #pragma unroll
+        for (uint j = 0; j < TN; j += 4) {
+             reinterpret_cast<float4*>(&reg_N[reg_write_stage][j])[0] =
+                 reinterpret_cast<const float4*>(&shared_B[0 * BN + (thread_col * TN + j)])[0];
+        }
+
         #pragma unroll
         for (uint dot_idx = 0; dot_idx < BK; ++dot_idx) {
-            // Load one element from A tile into registers per thread
-            #pragma unroll
-            for (uint i = 0; i < TM; ++i) {
-                reg_M[i] = shared_A[(thread_row * TM + i) * BK + dot_idx];
+            // Toggle stages for the next iteration's load / this iteration's compute
+            reg_read_stage ^= 1;
+            reg_write_stage ^= 1;
+
+            // --- Load data for the *next* iteration (dot_idx + 1) into the write buffer ---
+            const uint next_dot_idx = dot_idx + 1;
+            if (next_dot_idx < BK) {
+                #pragma unroll
+                for (uint i = 0; i < TM; ++i) {
+                    reg_M[reg_write_stage][i] = shared_A[(thread_row * TM + i) * BK + next_dot_idx];
+                }
+                #pragma unroll
+                for (uint j = 0; j < TN; j += 4) {
+                     reinterpret_cast<float4*>(&reg_N[reg_write_stage][j])[0] =
+                         reinterpret_cast<const float4*>(&shared_B[next_dot_idx * BN + (thread_col * TN + j)])[0];
+                }
             }
-            // Load TN elements from B tile into registers per thread (vectorised in chunks of 4)
-            #pragma unroll
-            for (uint j = 0; j < TN; j += 4) {
-                reinterpret_cast<float4*>(&reg_N[j])[0] =
-                    reinterpret_cast<const float4*>(&shared_B[dot_idx * BN + (thread_col * TN + j)])[0];
-            }
-            // FMA accumulation into thread-private result tile
+
+            // --- Compute using data from the *current* iteration (loaded previously into read buffer) ---
             #pragma unroll
             for (uint i = 0; i < TM; ++i) {
                 #pragma unroll
                 for (uint j = 0; j < TN; ++j) {
-                    thread_results[i][j] += reg_M[i] * reg_N[j];
+                    // Use the registers from the read stage for computation
+                    thread_results[i][j] += reg_M[reg_read_stage][i] * reg_N[reg_read_stage][j];
                 }
             }
         }
 
         // Toggle read_stage to the buffer we just finished copying (and will read next)
-        read_stage ^= 1;
+        write_stage ^= 1;
         // Flip the phase for the next mbarrier wait.
         phase ^= 1;
         // Sync threads before next iteration to ensure computation is finished before
@@ -207,8 +228,8 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
 // Kernel launcher function
 void launch_tma_double_buffered_matmul(const float* __restrict__ d_A, const float* __restrict__ d_B, float* __restrict__ d_C, int m, int n, int k, cudaStream_t stream) {
     // Use the best parameters found
-    constexpr int BM = 64;
-    constexpr int BN = 256;
+    constexpr int BM = 256;
+    constexpr int BN = 128;
     constexpr int BK = 32;
     constexpr int TM = 8;
     constexpr int TN = 4;
@@ -285,8 +306,8 @@ int main() {
     CHECK_CUDA_DRIVER(cuCtxGetCurrent(&ctx)); // Ensure context exists
 
     // Use the best parameters found
-    constexpr int BM = 64;
-    constexpr int BN = 256;
+    constexpr int BM = 256;
+    constexpr int BN = 128;
     constexpr int BK = 32;
     constexpr int TM = 8;
     constexpr int TN = 4;

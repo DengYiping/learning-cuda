@@ -16,7 +16,7 @@ EXECUTABLE_NAME = "temp_matmul_exec"
 # Parameter ranges (adjust as needed)
 BM_RANGE = [64, 128, 256]
 BN_RANGE = [64, 128, 256]
-BK_RANGE = [8, 16, 32, 64]  # Must be multiple of 4
+BK_RANGE = [8, 16, 32, 64, 128, 256]  # Must be multiple of 4
 TM_RANGE = [4, 8]
 TN_RANGE = [4, 8]        # Must be multiple of 4
 
@@ -47,7 +47,7 @@ def parse_gflops(output):
             return None
     return None
 
-def check_constraints(bm, bn, bk, tm, tn):
+def check_constraints(bm, bn, bk, tm, tn, use_double_buffer: bool = False):
     """Checks if the parameter combination is valid."""
     threads_per_block = bm * bn / (tm * tn)
     if threads_per_block == 0: # Avoid division by zero if tm/tn are large relative to bm/bn
@@ -57,7 +57,10 @@ def check_constraints(bm, bn, bk, tm, tn):
         # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Threads per block ({threads_per_block}) exceeds limit ({MAX_THREADS_PER_BLOCK})")
         return False
 
-    shared_mem_needed = (bm * bk + bk * bn) * 8 # sizeof(float)
+    shared_mem_needed = (bm * bk + bk * bn) * 4 # sizeof(float)
+    if use_double_buffer:
+        shared_mem_needed *= 2
+
     if shared_mem_needed > MAX_SHARED_MEMORY_BYTES:
         # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Shared memory ({shared_mem_needed} bytes) exceeds limit ({MAX_SHARED_MEMORY_BYTES})")
         return False
@@ -67,6 +70,8 @@ def check_constraints(bm, bn, bk, tm, tn):
     # Total regs = regs_per_thread * threads_per_block
     MAX_REGISTERS_PER_SM = 64 * 1024
     regs_per_thread_approx = tm * tn + tm + tn + 13
+    if use_double_buffer:
+        regs_per_thread_approx += tm * tn
     total_regs_approx = regs_per_thread_approx * threads_per_block
     if total_regs_approx > MAX_REGISTERS_PER_SM:
         # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Estimated register usage ({total_regs_approx}) exceeds limit ({MAX_REGISTERS_PER_SM})")
@@ -228,7 +233,7 @@ def run_tuning_worker(
     return worker_best_params, worker_best_gflops
 
 
-def main(source_file, header_files=None, num_gpus=1):
+def main(source_file, header_files=None, num_gpus=1, use_double_buffer=False):
     if not os.path.exists(source_file):
         print(f"Error: Source file not found: {source_file}")
         return
@@ -250,7 +255,7 @@ def main(source_file, header_files=None, num_gpus=1):
     print("Checking parameter constraints...")
     all_param_combinations = list(itertools.product(BM_RANGE, BN_RANGE, BK_RANGE, TM_RANGE, TN_RANGE))
     valid_param_combinations = [
-        params for params in all_param_combinations if check_constraints(*params)
+        params for params in all_param_combinations if check_constraints(*params, use_double_buffer=use_double_buffer)
     ]
     total_combinations = len(all_param_combinations)
     valid_count = len(valid_param_combinations)
@@ -343,5 +348,6 @@ if __name__ == "__main__":
     parser.add_argument("source_file", help="Path to the CUDA source file (.cu)")
     parser.add_argument("--headers", nargs="+", help="Header files to copy to the temporary directory")
     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use for parallel tuning (default: 1)")
+    parser.add_argument("--double_buffer", action="store_true", help="Assume double buffering for shared memory constraint check")
     args = parser.parse_args()
-    main(args.source_file, args.headers, args.gpus)
+    main(args.source_file, args.headers, args.gpus, args.double_buffer)
