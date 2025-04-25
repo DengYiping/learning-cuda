@@ -65,8 +65,8 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
 
     alignas(16) float thread_results[TM][TN] = {0.0f};
     // Double buffer registers for M and N tiles
-    alignas(16) float reg_M[2][TM];
-    alignas(16) float reg_N[2][TN];
+    alignas(16) float reg_M[2][TM * 4];
+    alignas(16) float reg_N[2][TN * 4];
 
     // ------------------------- PTX Asynchronous copy setup -------------------------
     auto block = cg::this_thread_block();
@@ -183,41 +183,54 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
 
         #pragma unroll
         for (uint i = 0; i < TM; ++i) {
-             reg_M[reg_write_stage][i] = smem_base_A[(thread_row * TM + i) * BK + 0];
+             reinterpret_cast<float4*>(&reg_M[reg_write_stage][i * 4])[0] = reinterpret_cast<const float4*>(&smem_base_A[(thread_row * TM + i) * BK])[0];
         }
         #pragma unroll
         for (uint j = 0; j < TN; j += 4) {
-             reinterpret_cast<float4*>(&reg_N[reg_write_stage][j])[0] =
+            reinterpret_cast<float4*>(&reg_N[reg_write_stage][j])[0] =
                  reinterpret_cast<const float4*>(&smem_base_B[0 * BN + (thread_col * TN + j)])[0];
+            reinterpret_cast<float4*>(&reg_N[reg_write_stage][TN + j])[0] =
+                 reinterpret_cast<const float4*>(&smem_base_B[1 * BN + (thread_col * TN + j)])[0];
+            reinterpret_cast<float4*>(&reg_N[reg_write_stage][TN * 2 + j])[0] =
+                 reinterpret_cast<const float4*>(&smem_base_B[2 * BN + (thread_col * TN + j)])[0];
+            reinterpret_cast<float4*>(&reg_N[reg_write_stage][TN * 3 + j])[0] =
+                 reinterpret_cast<const float4*>(&smem_base_B[3 * BN + (thread_col * TN + j)])[0];
         }
 
         #pragma unroll
-        for (uint dot_idx = 0; dot_idx < BK; ++dot_idx) {
+        for (uint dot_idx = 0; dot_idx < BK / 4; ++dot_idx) {
             // Toggle stages for the next iteration's load / this iteration's compute
             reg_read_stage ^= 1;
             reg_write_stage ^= 1;
 
-            // --- Load data for the *next* iteration (dot_idx + 1) into the write buffer ---
             const uint next_dot_idx = dot_idx + 1;
-            if (next_dot_idx < BK) {
+            if (next_dot_idx < BK / 4) {
                 #pragma unroll
                 for (uint i = 0; i < TM; ++i) {
-                    reg_M[reg_write_stage][i] = smem_base_A[(thread_row * TM + i) * BK + next_dot_idx];
+                    reinterpret_cast<float4*>(&reg_M[reg_write_stage][i * 4])[0] = reinterpret_cast<const float4*>(&smem_base_A[(thread_row * TM + i) * BK + next_dot_idx * 4])[0];
                 }
                 #pragma unroll
                 for (uint j = 0; j < TN; j += 4) {
-                     reinterpret_cast<float4*>(&reg_N[reg_write_stage][j])[0] =
-                         reinterpret_cast<const float4*>(&smem_base_B[next_dot_idx * BN + (thread_col * TN + j)])[0];
+                    reinterpret_cast<float4*>(&reg_N[reg_write_stage][j])[0] =
+                        reinterpret_cast<const float4*>(&smem_base_B[(next_dot_idx * 4 + 0) * BN + (thread_col * TN + j)])[0];
+                    reinterpret_cast<float4*>(&reg_N[reg_write_stage][TN + j])[0] =
+                        reinterpret_cast<const float4*>(&smem_base_B[(next_dot_idx * 4 + 1) * BN + (thread_col * TN + j)])[0];
+                    reinterpret_cast<float4*>(&reg_N[reg_write_stage][TN * 2 + j])[0] =
+                        reinterpret_cast<const float4*>(&smem_base_B[(next_dot_idx * 4 + 2) * BN + (thread_col * TN + j)])[0];
+                    reinterpret_cast<float4*>(&reg_N[reg_write_stage][TN * 3 + j])[0] =
+                        reinterpret_cast<const float4*>(&smem_base_B[(next_dot_idx * 4 + 3) * BN + (thread_col * TN + j)])[0];
                 }
             }
 
-            // --- Compute using data from the *current* iteration (loaded previously into read buffer) ---
             #pragma unroll
-            for (uint i = 0; i < TM; ++i) {
+            for (uint sub_dot_idx = 0; sub_dot_idx < 4; ++sub_dot_idx) {
                 #pragma unroll
-                for (uint j = 0; j < TN; ++j) {
-                    // Use the registers from the read stage for computation
-                    thread_results[i][j] += reg_M[reg_read_stage][i] * reg_N[reg_read_stage][j];
+                for (uint i = 0; i < TM; ++i) {
+                    #pragma unroll
+                    for (uint j = 0; j < TN; ++j) {
+                        // Use the registers from the read stage for computation
+                        thread_results[i][j] += reg_M[reg_read_stage][i * 4 + sub_dot_idx] * reg_N[reg_read_stage][j + sub_dot_idx * TN];
+                    }
                 }
             }
         }
@@ -253,7 +266,7 @@ void launch_tma_double_buffered_matmul(const float* __restrict__ d_A, const floa
     constexpr int BN = 64;
     constexpr int BK = 32;
     constexpr int TM = 8;
-    constexpr int TN = 4;
+    constexpr int TN = 8;
 
     // Create Tensor Maps
     CUtensorMap tensor_map_A;
@@ -330,7 +343,7 @@ int main() {
     constexpr int BN = 64;
     constexpr int BK = 32;
     constexpr int TM = 8;
-    constexpr int TN = 4;
+    constexpr int TN = 8;
 
     cudaDeviceProp deviceProp;
     CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, 0));
