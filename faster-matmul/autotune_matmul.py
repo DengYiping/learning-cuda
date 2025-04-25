@@ -85,15 +85,6 @@ def check_constraints(bm, bn, bk, tm, tn, use_double_buffer: bool = False):
          # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): TN must be a multiple of 4")
          return False
 
-    # Constraint: BN * 4 <= BK * TM * TN && BM * 4 <= BK * TM * TN
-    if bn * 4 > bk * tm * tn or bm * 4 > bk * tm * tn:
-        # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): BN*4 must be <= BK*TM*TN and BM*4 must be <= BK*TM*TN")
-        return False
-
-    # blockDim.x = bm * bn / (tm * tn) needs to be divisible by (bn / tn)
-    # This simplifies to bm / tm, which is implicitly handled if bm, tm are powers of 2? Let's assume it's fine for now.
-    # Re-check if compilation errors occur related to indexing.
-
     return True
 
 def run_tuning_worker(
@@ -263,9 +254,15 @@ def main(source_file, header_files=None, num_gpus=1, use_double_buffer=False):
     print(f"Starting autotuning for {source_file} using {num_gpus} GPU(s)")
     print(f"Total parameter combinations: {total_combinations}")
     print(f"Valid combinations meeting constraints: {valid_count}")
+    if valid_count > 0:
+        print("Valid parameter combinations (BM, BN, BK, TM, TN):")
+        for params in valid_param_combinations:
+            print(f"  {params}")
+
     if valid_count == 0:
         print("No valid parameter combinations found. Exiting.")
         return
+
     print(f"NVCC path: {NVCC_PATH}")
     print(f"NVCC flags: {' '.join(NVCC_FLAGS)}")
     if header_files:
