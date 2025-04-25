@@ -27,23 +27,31 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
     float* __restrict__ C,
     const int M, const int N, const int K)
 {
-    /* ---------------- Shared memory layout (double buffered) -------------
-       |  A_0  |  B_0  |  A_1  |  B_1  | + mbarrier[1]
-       --------------------------------------------------------------------*/
-    // Allocate shared memory with space for the mbarrier at the end.
-    // Use char for byte-level access and ensure alignment
+    /* ---------------- Shared memory layout (double buffered + static mbarrier) -------------
+       |  A_0 (dyn) |  A_1 (dyn) |  B_0 (dyn) |  B_1 (dyn) | + mbarrier[1] (static)
+       -------------------------------------------------------------------------------------*/
+    // Allocate shared memory for double-buffered tiles using dynamic shared memory
     alignas(128) extern __shared__ char smem_bytes[];
-    // Ensure 16-byte alignment for mbarrier relative to the start of smem_bytes.
-    constexpr size_t smem_tile_bytes = (BM * BK + BN * BK) * sizeof(float);
-    constexpr size_t mbarrier_offset = 2 * smem_tile_bytes;
-    constexpr size_t mbarrier_aligned_offset = (mbarrier_offset + 15) & ~15; // Align to 16 bytes
-    uint64_t* mbar = reinterpret_cast<uint64_t*>(&smem_bytes[mbarrier_aligned_offset]);
 
-    // Derive float pointers from the aligned char buffer
-    float* smem_A[2] = { reinterpret_cast<float*>(&smem_bytes[0]),
-                         reinterpret_cast<float*>(&smem_bytes[smem_tile_bytes]) };
-    float* smem_B[2] = { reinterpret_cast<float*>(&smem_bytes[BM * BK * sizeof(float)]),
-                         reinterpret_cast<float*>(&smem_bytes[smem_tile_bytes + BM * BK * sizeof(float)]) };
+    // Statically allocate the mbarrier, ensuring 16-byte alignment.
+    alignas(16) __shared__ uint64_t mbarrier_storage[1];
+    // Get pointer to the mbarrier.
+    uint64_t* mbar = mbarrier_storage;
+
+    // Calculate the size needed for one stage's A and B tiles
+    constexpr size_t smem_tile_A_bytes = BM * BK * sizeof(float);
+    constexpr size_t smem_tile_B_bytes = BK * BN * sizeof(float);
+    // Offset between the two buffers for A and B respectively (in bytes)
+    constexpr size_t smem_offset_A = smem_tile_A_bytes;
+    constexpr size_t smem_offset_B = smem_tile_B_bytes;
+    // Total bytes for one stage (used for mbarrier arrive)
+    constexpr size_t smem_one_stage_bytes = smem_tile_A_bytes + smem_tile_B_bytes;
+
+    // Base pointers for the A and B double buffers in shared memory
+    // Make non-const to allow swapping via XOR
+    float* smem_base_A = reinterpret_cast<float*>(&smem_bytes[0]);
+    // B buffers start after both A buffers
+    float* smem_base_B = reinterpret_cast<float*>(&smem_bytes[2 * smem_tile_A_bytes]);
 
     // blockIdx.x is the block id in the N dimension, aka the column index of the block
     // blockIdx.y is the block id in the M dimension, aka the row index of the block
@@ -86,9 +94,7 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
     reg_write_stage ^= 1; // Now reg_write_stage = 1
 
     // Calculate total bytes per tile for A and B
-    constexpr size_t bytes_A_tile = BM * BK * sizeof(float);
-    constexpr size_t bytes_B_tile = BK * BN * sizeof(float);
-    constexpr size_t total_bytes_per_stage = bytes_A_tile + bytes_B_tile;
+    constexpr size_t total_bytes_per_stage = smem_one_stage_bytes; // Reuse calculation
 
     // Calculate base 2D offsets for this block
     const uint32_t base_offset_A_y = blockIdx.y * BM;
@@ -99,16 +105,16 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
 
     // ---------------- Prime the pipeline : load the very first tile using TMA ----------------
     if (is_master_thread) {
-        // Initiate A tile copy (TMA 2D)
+        // Initiate A tile copy (TMA 2D) into the initial buffer (buffer 0)
         ptx::cp_async_bulk_tensor_2d_global_to_shared(
-            reinterpret_cast<uint64_t*>(smem_A[write_stage]),
+            reinterpret_cast<uint64_t*>(smem_base_A), // Use current base pointer
             (const uint64_t*)&tensor_map_A,
             next_offset_K, base_offset_A_y,
             mbar
         );
-        // Initiate B tile copy (TMA 2D)
+        // Initiate B tile copy (TMA 2D) into the initial buffer (buffer 0)
         ptx::cp_async_bulk_tensor_2d_global_to_shared(
-            reinterpret_cast<uint64_t*>(smem_B[write_stage]),
+            reinterpret_cast<uint64_t*>(smem_base_B), // Use current base pointer
             (const uint64_t*)&tensor_map_B,
             base_offset_B_x, next_offset_K,
             mbar
@@ -119,7 +125,9 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
         // Other threads just arrive.
         ptx::mbarrier_arrive(mbar);
     }
-    write_stage ^= 1;
+    // Swap pointers to point to the other buffer (buffer 1) for the next copy
+    smem_base_A = reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(smem_base_A) ^ smem_offset_A);
+    smem_base_B = reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(smem_base_B) ^ smem_offset_B);
 
     // number of K-tiles we will iterate over
     const uint num_tiles = CEIL_DIV(K, BK);
@@ -127,21 +135,22 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
     for (uint tile = 0; tile < num_tiles; ++tile) {
         next_offset_K += BK;
         // Wait for the copy initiated in the previous iteration (or priming phase) to complete.
+        // This copy targeted the buffer *not* currently pointed to by smem_base_A/B.
         ptx::mbarrier_wait_parity(mbar, phase);
 
         // ---------------- Preload the next tile (if any) while computation continues ----------------
         if (tile + 1 < num_tiles) {
             if (is_master_thread) {
-                 // Initiate A tile copy (TMA 2D) for the next tile
+                 // Initiate A tile copy (TMA 2D) for the next tile into the buffer pointed to by current smem_base_A
                 ptx::cp_async_bulk_tensor_2d_global_to_shared(
-                    reinterpret_cast<uint64_t*>(smem_A[write_stage]),
+                    reinterpret_cast<uint64_t*>(smem_base_A), // Use current base pointer
                     (const uint64_t*)&tensor_map_A,
                     next_offset_K, base_offset_A_y,
                     mbar
                 );
-                // Initiate B tile copy (TMA 2D) for the next tile
+                // Initiate B tile copy (TMA 2D) for the next tile into the buffer pointed to by current smem_base_B
                  ptx::cp_async_bulk_tensor_2d_global_to_shared(
-                    reinterpret_cast<uint64_t*>(smem_B[write_stage]),
+                    reinterpret_cast<uint64_t*>(smem_base_B), // Use current base pointer
                     (const uint64_t*)&tensor_map_B,
                     base_offset_B_x, next_offset_K,
                     mbar
@@ -155,20 +164,19 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
             // Note: Global A/B pointers are not advanced here as TensorMap handles addressing
         }
 
-        // Set up shared pointers for the tile we are about to compute on
-        const float* shared_A = smem_A[phase];
-        const float* shared_B = smem_B[phase];
-
+        // Swap pointers to point to the other buffer (buffer 1) for the next copy
+        smem_base_A = reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(smem_base_A) ^ smem_offset_A);
+        smem_base_B = reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(smem_base_B) ^ smem_offset_B);
         // ---------------- Matrix multiply on the current shared-memory tile ----------------
 
         #pragma unroll
         for (uint i = 0; i < TM; ++i) {
-             reg_M[reg_write_stage][i] = shared_A[(thread_row * TM + i) * BK + 0];
+             reg_M[reg_write_stage][i] = smem_base_A[(thread_row * TM + i) * BK + 0];
         }
         #pragma unroll
         for (uint j = 0; j < TN; j += 4) {
              reinterpret_cast<float4*>(&reg_N[reg_write_stage][j])[0] =
-                 reinterpret_cast<const float4*>(&shared_B[0 * BN + (thread_col * TN + j)])[0];
+                 reinterpret_cast<const float4*>(&smem_base_B[0 * BN + (thread_col * TN + j)])[0];
         }
 
         #pragma unroll
@@ -182,12 +190,12 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void tma_double_buffered_matmu
             if (next_dot_idx < BK) {
                 #pragma unroll
                 for (uint i = 0; i < TM; ++i) {
-                    reg_M[reg_write_stage][i] = shared_A[(thread_row * TM + i) * BK + next_dot_idx];
+                    reg_M[reg_write_stage][i] = smem_base_A[(thread_row * TM + i) * BK + next_dot_idx];
                 }
                 #pragma unroll
                 for (uint j = 0; j < TN; j += 4) {
                      reinterpret_cast<float4*>(&reg_N[reg_write_stage][j])[0] =
-                         reinterpret_cast<const float4*>(&shared_B[next_dot_idx * BN + (thread_col * TN + j)])[0];
+                         reinterpret_cast<const float4*>(&smem_base_B[next_dot_idx * BN + (thread_col * TN + j)])[0];
                 }
             }
 
@@ -290,13 +298,12 @@ void launch_tma_double_buffered_matmul(const float* __restrict__ d_A, const floa
     // With row-major layout, this is more cache-friendly.
     dim3 gridDim(CEIL_DIV(n, BN), CEIL_DIV(m, BM));
 
-    // Shared memory: 2 stages for A and B tiles + space for mbarrier (aligned)
-    size_t smem_tile_bytes = (BM * BK + BN * BK) * sizeof(float);
-    size_t mbarrier_offset = 2 * smem_tile_bytes;
-    size_t mbarrier_aligned_offset = (mbarrier_offset + 15) & ~15; // Align to 16 bytes
-    size_t smem_bytes = mbarrier_aligned_offset + sizeof(uint64_t); // Total size needed
+    // Shared memory: Calculate size needed for the double-buffered A/B tiles only.
+    // Layout: A0 | A1 | B0 | B1
+    size_t smem_bytes_dynamic = (2 * BM * BK + 2 * BN * BK) * sizeof(float);
 
-    tma_double_buffered_matmul<BM, BN, BK, TM, TN><<<gridDim, blockDim, smem_bytes, stream>>>(
+    // Launch kernel with dynamic shared memory size for A/B buffers
+    tma_double_buffered_matmul<BM, BN, BK, TM, TN><<<gridDim, blockDim, smem_bytes_dynamic, stream>>>(
         tensor_map_A, tensor_map_B, d_C, m, n, k);
 }
 
@@ -346,15 +353,18 @@ int main() {
      std::cout << "Device async engine count: " << asyncEngineCount << std::endl;
 
 
-    // Calculate required shared memory
-    size_t smem_tile_bytes = (BM * BK + BN * BK) * sizeof(float);
-    size_t mbarrier_offset = 2 * smem_tile_bytes;
-    size_t mbarrier_aligned_offset = (mbarrier_offset + 15) & ~15;
-    size_t required_smem = mbarrier_aligned_offset + sizeof(uint64_t);
-    std::cout << "Required shared memory per block: " << required_smem << " bytes" << std::endl;
-    if (required_smem > deviceProp.sharedMemPerMultiprocessor) {
-         std::cerr << "Error: Required shared memory (" << required_smem
-                   << " bytes) exceeds device limit (" << deviceProp.sharedMemPerMultiprocessor
+    // Calculate required dynamic shared memory for A/B buffers
+    size_t required_smem_dynamic = (2 * BM * BK + 2 * BN * BK) * sizeof(float); // Updated calculation
+    std::cout << "Required dynamic shared memory per block: " << required_smem_dynamic << " bytes" << std::endl;
+    // Calculate total static shared memory (mbarrier only)
+    size_t required_smem_static = sizeof(uint64_t); // Size of the static mbarrier
+    std::cout << "Required static shared memory per block: " << required_smem_static << " bytes" << std::endl;
+
+    // Check if required dynamic shared memory exceeds limit
+    if (required_smem_dynamic + required_smem_static > deviceProp.sharedMemPerMultiprocessor) {
+         std::cerr << "Error: Required dynamic shared memory (" << required_smem_dynamic
+                   << " bytes) plus static shared memory (" << required_smem_static
+                   << " bytes) exceeds device limit per multiprocessor (" << deviceProp.sharedMemPerMultiprocessor
                    << " bytes)." << std::endl;
         return 1;
     }
@@ -365,11 +375,11 @@ int main() {
         cudaFuncAttributePreferredSharedMemoryCarveout,
         100 // Max carveout, as TMA benefits from L1
     ));
-    // Set dynamic shared memory size for this kernel
+    // Set dynamic shared memory size attribute for the kernel
     CHECK_CUDA(cudaFuncSetAttribute(
         (const void*)tma_double_buffered_matmul<BM, BN, BK, TM, TN>, // Need to cast kernel function pointer
         cudaFuncAttributeMaxDynamicSharedMemorySize,
-        static_cast<int>(required_smem)
+        static_cast<int>(required_smem_dynamic)
     ));
 
     // Default matrix dimensions
