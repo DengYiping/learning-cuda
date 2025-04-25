@@ -1,7 +1,7 @@
 NVCC = nvcc
 NVCCFLAGS = -O3 -std=c++20 -gencode=arch=compute_90,code=sm_90 -Xcompiler -Wall,-Wextra --generate-line-info -lcuda
 
-all: naive_matmul coalesced_matmul sram_matmul 1d_block_tiling_matmul 2d_block_tiling_matmul vectorized_2d_block_tiling_matmul double_buffering_matmul async_global_to_shared_matmul tma_async_matmul tma_double_buffer_matmul
+all: naive_matmul coalesced_matmul sram_matmul 1d_block_tiling_matmul 2d_block_tiling_matmul vectorized_2d_block_tiling_matmul double_buffering_matmul async_global_to_shared_matmul tma_async_matmul tma_double_buffer_matmul sync_double_buffer_matmul sync_db_warp_matmul
 
 naive_matmul: naive_matmul.cu
 	$(NVCC) $(NVCCFLAGS) naive_matmul.cu -o naive_matmul
@@ -63,8 +63,21 @@ tma_double_buffer_matmul: tma_double_buffer_matmul.cu
 tma_double_buffer_matmul_profiling: tma_double_buffer_matmul
 	ncu -f -o tma_double_buffer_matmul_report --set full ./tma_double_buffer_matmul
 
+sync_double_buffer_matmul: sync_double_buffer_matmul.cu
+	$(NVCC) $(NVCCFLAGS) sync_double_buffer_matmul.cu -o sync_double_buffer_matmul
+
+sync_double_buffer_matmul_profiling: sync_double_buffer_matmul
+	ncu -f -o sync_double_buffer_matmul_report --set full ./sync_double_buffer_matmul
+
+sync_db_warp_matmul: sync_db_warp_matmul.cu
+	$(NVCC) $(NVCCFLAGS) sync_db_warp_matmul.cu -o sync_db_warp_matmul
+
+sync_db_warp_matmul_profiling: sync_db_warp_matmul
+	ncu -f -o sync_db_warp_matmul_report --set full ./sync_db_warp_matmul
+
+
 clean:
-	rm -f naive_matmul coalesced_matmul sram_matmul 1d_block_tiling_matmul 2d_block_tiling_matmul vectorized_2d_block_tiling_matmul double_buffering_matmul async_global_to_shared_matmul tma_async_matmul tma_double_buffer_matmul
-	rm -f naive_matmul_report.ncu-rep coalesced_matmul_report.ncu-rep sram_matmul_report.ncu-rep 1d_block_tiling_matmul_report.ncu-rep 2d_block_tiling_matmul_report.ncu-rep vectorized_2d_block_tiling_matmul_report.ncu-rep double_buffering_matmul_report.ncu-rep async_global_to_shared_matmul_report.ncu-rep tma_async_matmul_report.ncu-rep tma_double_buffer_matmul_report.ncu-rep
+	rm -f naive_matmul coalesced_matmul sram_matmul 1d_block_tiling_matmul 2d_block_tiling_matmul vectorized_2d_block_tiling_matmul double_buffering_matmul async_global_to_shared_matmul tma_async_matmul tma_double_buffer_matmul sync_double_buffer_matmul sync_db_warp_matmul
+	rm -f naive_matmul_report.ncu-rep coalesced_matmul_report.ncu-rep sram_matmul_report.ncu-rep 1d_block_tiling_matmul_report.ncu-rep 2d_block_tiling_matmul_report.ncu-rep vectorized_2d_block_tiling_matmul_report.ncu-rep double_buffering_matmul_report.ncu-rep async_global_to_shared_matmul_report.ncu-rep tma_async_matmul_report.ncu-rep tma_double_buffer_matmul_report.ncu-rep sync_double_buffer_matmul_report.ncu-rep sync_db_warp_matmul_report.ncu-rep
 
 .PHONY: all clean benchmark
