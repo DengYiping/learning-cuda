@@ -162,8 +162,8 @@ __global__ __launch_bounds__(BM * BN * 32 / (WM * WN)) void vectorized_2d_block_
 
     // Store the results
     for (uint w_sub_row = 0; w_sub_row < WMITER; ++w_sub_row) {
-        for (uint w_sub_col = 0; w_sub_col < WNITER; ++w_sub_col) {
-            for (uint i = 0; i < TM; ++i) {
+        for (uint i = 0; i < TM; ++i) {
+            for (uint w_sub_col = 0; w_sub_col < WNITER; ++w_sub_col) {
                 for (uint j = 0; j < TN; j+= 4) {
                     uint write_idx_base = 
                         (warp_row * WM + w_sub_row * W_SUB_M + lane_row * TM + i) * N + 
