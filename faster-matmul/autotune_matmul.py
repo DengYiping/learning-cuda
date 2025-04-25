@@ -47,9 +47,16 @@ def parse_gflops(output):
             return None
     return None
 
-def check_constraints(bm, bn, bk, tm, tn, use_double_buffer: bool = False):
+def check_constraints(bm, bn, bk, tm, tn, use_double_buffer: bool = False, is_warptiling: bool = False):
     """Checks if the parameter combination is valid."""
-    threads_per_block = bm * bn / (tm * tn)
+    # Conditional thread calculation
+    if is_warptiling:
+        # Ensure division is integer division if necessary, although Python 3 does float division
+        # Let's assume float division is fine for comparison, or force int if needed
+        threads_per_block = (bm * bn) / 64
+    else:
+        threads_per_block = (bm * bn) / (tm * tn)
+
     if threads_per_block == 0: # Avoid division by zero if tm/tn are large relative to bm/bn
         # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Invalid thread configuration leads to zero threads.")
         return False
@@ -69,9 +76,14 @@ def check_constraints(bm, bn, bk, tm, tn, use_double_buffer: bool = False):
     # Formula provided: regs_per_thread = TM * TN + TM + TN + 16
     # Total regs = regs_per_thread * threads_per_block
     MAX_REGISTERS_PER_SM = 64 * 1024
-    regs_per_thread_approx = tm * tn + tm + tn + 13
-    if use_double_buffer:
-        regs_per_thread_approx += tm * tn
+    if is_warptiling:
+        regs_per_thread_approx = 8 * 8 + 8 + 8 + 13
+        if use_double_buffer:
+            regs_per_thread_approx += 8 + 8
+    else:
+        regs_per_thread_approx = tm * tn + tm + tn + 13
+        if use_double_buffer:
+            regs_per_thread_approx += tm * tn
     total_regs_approx = regs_per_thread_approx * threads_per_block
     if total_regs_approx > MAX_REGISTERS_PER_SM:
         # print(f"Skipping ({bm},{bn},{bk},{tm},{tn}): Estimated register usage ({total_regs_approx}) exceeds limit ({MAX_REGISTERS_PER_SM})")
@@ -241,23 +253,47 @@ def main(source_file, header_files=None, num_gpus=1, use_double_buffer=False):
     tested_count = 0
     valid_count = 0
     total_combinations = 0 # Will calculate after filtering
+    param_ranges_desc = "(BM, BN, BK, TM, TN)" # Description for printing
 
     # Filter combinations first
     print("Checking parameter constraints...")
-    all_param_combinations = list(itertools.product(BM_RANGE, BN_RANGE, BK_RANGE, TM_RANGE, TN_RANGE))
-    valid_param_combinations = [
-        params for params in all_param_combinations if check_constraints(*params, use_double_buffer=use_double_buffer)
-    ]
-    total_combinations = len(all_param_combinations)
+    if args.warptiling:
+        print("Warp Tiling mode enabled: Fixing TM=4, TN=4.")
+        fixed_tm = 4
+        fixed_tn = 4
+        if fixed_tn % 4 != 0:
+             print(f"Error: Fixed TN={fixed_tn} in warptiling mode must be a multiple of 4.")
+             return
+        param_ranges_desc = "(BM, BN, BK) with TM=4, TN=4 fixed"
+        all_param_combinations_base = list(itertools.product(BM_RANGE, BN_RANGE, BK_RANGE))
+        total_combinations = len(all_param_combinations_base)
+        valid_param_combinations = [
+            (*params_base, fixed_tm, fixed_tn) # Append fixed TM, TN
+            for params_base in all_param_combinations_base
+            if check_constraints(*params_base, fixed_tm, fixed_tn, use_double_buffer=use_double_buffer, is_warptiling=True)
+        ]
+    else:
+        all_param_combinations = list(itertools.product(BM_RANGE, BN_RANGE, BK_RANGE, TM_RANGE, TN_RANGE))
+        total_combinations = len(all_param_combinations)
+        valid_param_combinations = [
+            params for params in all_param_combinations if check_constraints(*params, use_double_buffer=use_double_buffer, is_warptiling=False)
+        ]
+
     valid_count = len(valid_param_combinations)
 
     print(f"Starting autotuning for {source_file} using {num_gpus} GPU(s)")
-    print(f"Total parameter combinations: {total_combinations}")
+    print(f"Total parameter combinations checked {param_ranges_desc}: {total_combinations}")
     print(f"Valid combinations meeting constraints: {valid_count}")
     if valid_count > 0:
-        print("Valid parameter combinations (BM, BN, BK, TM, TN):")
-        for params in valid_param_combinations:
-            print(f"  {params}")
+        print(f"Valid parameter combinations {param_ranges_desc}:")
+        # Print only the varying part for warptiling mode for brevity
+        if args.warptiling:
+            for params in valid_param_combinations:
+                 print(f"  ({params[0]}, {params[1]}, {params[2]})") # BM, BN, BK
+        else:
+            for params in valid_param_combinations:
+                print(f"  {params}")
+
 
     if valid_count == 0:
         print("No valid parameter combinations found. Exiting.")
@@ -346,5 +382,6 @@ if __name__ == "__main__":
     parser.add_argument("--headers", nargs="+", help="Header files to copy to the temporary directory")
     parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use for parallel tuning (default: 1)")
     parser.add_argument("--double_buffer", action="store_true", help="Assume double buffering for shared memory constraint check")
+    parser.add_argument("--warptiling", action="store_true", help="Enable warp tiling mode (fix TM=4, TN=4, tune BM, BN, BK)")
     args = parser.parse_args()
     main(args.source_file, args.headers, args.gpus, args.double_buffer)
