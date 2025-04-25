@@ -19,7 +19,18 @@ namespace cg = cooperative_groups;
     } \
 } while(0)
 
-template <int BM, int BN, int BK, int TM, int TN>
+constexpr uint TM = 4;
+constexpr uint TN = 4;
+constexpr uint WMITER = 2;
+constexpr uint WNITER = 2;
+
+constexpr uint WM = 32;
+constexpr uint WN = 64;
+
+constexpr uint W_SUB_M = WM / WMITER; // 16 -> 4 threads
+constexpr uint W_SUB_N = WN / WNITER; // 32 -> 8 threads 
+
+template <int BM, int BN, int BK>
 __global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tiling_matmul(
     const __grid_constant__ CUtensorMap tensor_map_A, // Pass by value with __grid_constant__
     const __grid_constant__ CUtensorMap tensor_map_B, // Pass by value with __grid_constant__
@@ -33,15 +44,21 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tilin
     float* shared_A = reinterpret_cast<float*>(smem_buffer);
     float* shared_B = shared_A + BM * BK;
 
-    const uint thread_col = threadIdx.x % (BN / TN); // 0 ... BN / TN - 1
-    const uint thread_row = threadIdx.x / (BN / TN); // 0 ... BM / TM - 1
+    const uint lane_id = threadIdx.x & 0x1F; // 0 ... 31
+    const uint warp_id = threadIdx.x >> 5; // 0 ... 31
+
+    const uint warp_col = warp_id % (BN / WN);
+    const uint warp_row = warp_id / (BN / WN);
+
+    const uint lane_col = lane_id % (W_SUB_N / TN);
+    const uint lane_row = lane_id / (W_SUB_N / TN);
 
     // Adjust C pointer for the current block
     float* C_block_start = C + blockIdx.y * BM * N + blockIdx.x * BN;
 
-    alignas(16) float thread_results[TM][TN] = {0.0f};
-    alignas(16) float reg_M[TM][4]; // we load 4 floats at a time
-    alignas(16) float reg_N[TN];
+    alignas(16) float thread_results[WMITER * TM][WNITER * TN] = {0.0f};
+    alignas(16) float reg_M[TM * WMITER];
+    alignas(16) float reg_N[TN * WNITER];
 
     // PTX Asynchronous copy setup
     auto block = cg::this_thread_block();
@@ -108,27 +125,27 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tilin
 
         // Perform matrix multiplication for this tile
         #pragma unroll
-        for (uint dot_idx = 0; dot_idx < BK / 4; ++dot_idx) {
+        for (uint dot_idx = 0; dot_idx < BK; ++dot_idx) {
             // Load column of A and row of B into registers
-            #pragma unroll
-            for (uint i = 0; i < TM; ++i) {
-                *reinterpret_cast<float4*>(reg_M[i]) = reinterpret_cast<const float4*>(&shared_A[(thread_row * TM + i) * BK + dot_idx * 4])[0];
+            for (uint w_sub_row = 0; w_sub_row < WMITER; ++w_sub_row) {
+                for (uint i = 0; i < TM; i++) {
+                    reg_M[w_sub_row * TM + i] = shared_A[(warp_row * WM + w_sub_row * W_SUB_M + lane_row * TM + i) * BK + dot_idx];
+                }
             }
 
-            #pragma unroll
-            for (uint sub_dot_idx = 0; sub_dot_idx < 4; ++sub_dot_idx) {
-                #pragma unroll
-                for (uint j = 0; j < TN; j += 4) {
-                    reinterpret_cast<float4*>(&reg_N[j])[0] =
-                        reinterpret_cast<const float4*>(&shared_B[(dot_idx * 4 + sub_dot_idx) * BN + (thread_col * TN + j)])[0];
+            for (uint w_sub_col = 0; w_sub_col < WNITER; ++w_sub_col) {
+                for (uint j = 0; j < TN; j+= 4) {
+                    reinterpret_cast<float4*>(reg_N + w_sub_col * TN + j)[0] = 
+                        reinterpret_cast<const float4*>(&shared_B[(dot_idx * BN + warp_col * WN + w_sub_col * W_SUB_N + lane_col * TN + j)])[0];
                 }
+            }
 
-                // Compute outer product and accumulate
-                #pragma unroll
-                for (uint i = 0; i < TM; ++i) {
-                    #pragma unroll
-                    for (uint j = 0; j < TN; ++j) {
-                        thread_results[i][j] += reg_M[i][sub_dot_idx] * reg_N[j];
+            for (uint w_sub_row = 0; w_sub_row < WMITER; ++w_sub_row) {
+                for (uint w_sub_col = 0; w_sub_col < WNITER; ++w_sub_col) {
+                    for (uint m = 0; m < TM; ++m) {
+                        for (uint n = 0; n < TN; ++n) {
+                            thread_results[(w_sub_row * TM + m)][w_sub_col * TN + n] += reg_M[w_sub_row * TM + m] * reg_N[w_sub_col * TN + n];
+                        }
                     }
                 }
             }
@@ -140,12 +157,16 @@ __global__ __launch_bounds__(BM * BN / (TM * TN)) void vectorized_2d_block_tilin
     }
 
     // Store the results
-    #pragma unroll
-    for (uint i = 0; i < TM; i++) {
-        #pragma unroll
-        for (uint j = 0; j < TN; j+= 4) {
-             uint write_idx_base = (thread_row * TM + i) * N + (thread_col * TN + j);
-             reinterpret_cast<float4*>(&C_block_start[write_idx_base])[0] = reinterpret_cast<float4*>(&thread_results[i][j])[0];
+    for (uint w_sub_row = 0; w_sub_row < WMITER; ++w_sub_row) {
+        for (uint w_sub_col = 0; w_sub_col < WNITER; ++w_sub_col) {
+            for (uint i = 0; i < TM; ++i) {
+                for (uint j = 0; j < TN; j+= 4) {
+                    uint write_idx_base = 
+                        (warp_row * WM + w_sub_row * W_SUB_M + lane_row * TM + i) * N + 
+                        (warp_col * WN + w_sub_col * W_SUB_N + lane_col * TN + j);
+                    reinterpret_cast<float4*>(&C_block_start[write_idx_base])[0] = reinterpret_cast<float4*>(&thread_results[w_sub_row * TM + i][w_sub_col * TN + j])[0];
+                }
+            }
         }
     }
 }
@@ -155,8 +176,6 @@ void launch_vectorized_2d_block_tiling_matmul(const float* __restrict__ d_A, con
     constexpr int BM = 64;
     constexpr int BN = 64;
     constexpr int BK = 64;
-    constexpr int TM = 8;
-    constexpr int TN = 4;
 
     // Create Tensor Maps
     CUtensorMap tensor_map_A;
@@ -204,11 +223,13 @@ void launch_vectorized_2d_block_tiling_matmul(const float* __restrict__ d_A, con
         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     ));
 
-    dim3 blockDim(BM * BN / (TM * TN));
+    // BM * BN / (WM * WN) = number of warps required
+    // number of threads = BM * BN * 32 / (WM * WN)
+    dim3 blockDim(BM * BN * 32 / (WM * WN));
     dim3 gridDim(CEIL_DIV(n, BN), CEIL_DIV(m, BM));
     size_t shared_mem_size = (BM * BK + BK * BN) * sizeof(float);
 
-    vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN><<<gridDim, blockDim, shared_mem_size, stream>>>(
+    vectorized_2d_block_tiling_matmul<BM, BN, BK><<<gridDim, blockDim, shared_mem_size, stream>>>(
         tensor_map_A,
         tensor_map_B,
         d_C, m, n, k);
@@ -222,8 +243,6 @@ int main() {
     constexpr int BM = 64;
     constexpr int BN = 64;
     constexpr int BK = 64;
-    constexpr int TM = 8;
-    constexpr int TN = 4;
 
     cudaDeviceProp deviceProp;
     CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, 0));
@@ -232,7 +251,7 @@ int main() {
 
     // Set kernel attributes (carveout preference, max dynamic shared memory)
     CHECK_CUDA(cudaFuncSetAttribute(
-        (const void*)vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN>,
+        (const void*)vectorized_2d_block_tiling_matmul<BM, BN, BK>,
         cudaFuncAttributePreferredSharedMemoryCarveout,
         90 // 90% of the shared memory per block
     ));
@@ -241,7 +260,7 @@ int main() {
          std::cerr << "Warning: Requested shared memory (" << shared_mem_size << ") exceeds device limit (" << deviceProp.sharedMemPerMultiprocessor << ")" << std::endl;
      }
      CHECK_CUDA(cudaFuncSetAttribute(
-         (const void*)vectorized_2d_block_tiling_matmul<BM, BN, BK, TM, TN>,
+         (const void*)vectorized_2d_block_tiling_matmul<BM, BN, BK>,
          cudaFuncAttributeMaxDynamicSharedMemorySize,
          shared_mem_size
      ));
