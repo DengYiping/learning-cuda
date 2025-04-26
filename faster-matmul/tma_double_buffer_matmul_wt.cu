@@ -43,7 +43,8 @@ __global__ __launch_bounds__(BM * BN * 32 / (WM * WN)) void tma_double_buffered_
        |  A_0 (dyn) |  A_1 (dyn) |  B_0 (dyn) |  B_1 (dyn) | + mbarrier[1] (static)
        -------------------------------------------------------------------------------------*/
     // Allocate shared memory for double-buffered tiles using dynamic shared memory
-    alignas(128) extern __shared__ char smem_bytes[];
+    // 16384 = 16KB, align so that we can use bitwise XOR to swap buffers
+    alignas(16384) extern __shared__ char smem_bytes[];
     // Calculate total threads per block for warp tiling
     constexpr int THREADS_PER_BLOCK = BM * BN * 32 / (WM * WN);
 
