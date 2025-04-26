@@ -4,7 +4,8 @@
 #include "ptx.cuh"
 #include <cuda.h> // Include CUDA Driver API header
 #include <stdio.h> // For printf debugging
-#include <cstdlib> // For exit()
+#include <cstdlib> // For exit
+#include <algorithm> // For std::max
 
 #define CEIL_DIV(M, N) (((M) + (N) - 1) / (N))
 namespace cg = cooperative_groups;
@@ -31,6 +32,14 @@ constexpr uint WN = 64;
 constexpr uint W_SUB_M = WM / WMITER; // 16 -> 4 threads
 constexpr uint W_SUB_N = WN / WNITER; // 32 -> 8 threads 
 
+// N is the width (K) of the tile in shared memory
+template <int N>
+__device__ __forceinline__ float tma_swizzle_128b_load(const float* smem_ptr, uint y, uint x) {
+    // 128b swizzle with 16 byte chunks (4 floats)
+    int swizzled_index = y * N + ((y % 8) ^ (x / 4)) * 4 + (x % 4);
+
+    return smem_ptr[swizzled_index];
+}
 
 template <int BM, int BN, int BK>
 __global__ __launch_bounds__(BM * BN * 32 / (WM * WN)) void tma_double_buffered_matmul(
@@ -44,7 +53,7 @@ __global__ __launch_bounds__(BM * BN * 32 / (WM * WN)) void tma_double_buffered_
        -------------------------------------------------------------------------------------*/
     // Allocate shared memory for double-buffered tiles using dynamic shared memory
     // 16384 = 16KB, align so that we can use bitwise XOR to swap buffers
-    alignas(16384) extern __shared__ char smem_bytes[];
+    alignas(std::max(BM * BK, BN * BK) * sizeof(float)) extern __shared__ char smem_bytes[];
     // Calculate total threads per block for warp tiling
     constexpr int THREADS_PER_BLOCK = BM * BN * 32 / (WM * WN);
 
@@ -209,7 +218,9 @@ __global__ __launch_bounds__(BM * BN * 32 / (WM * WN)) void tma_double_buffered_
         for (uint w_sub_row = 0; w_sub_row < WMITER; ++w_sub_row) {
             #pragma unroll
             for (uint i = 0; i < TM; ++i) {
-                reg_M[reg_write_stage][w_sub_row * TM + i] = smem_base_A[(warp_row * WM + w_sub_row * W_SUB_M + lane_row * TM + i) * BK + 0]; // dot_idx = 0
+                reg_M[reg_write_stage][w_sub_row * TM + i] = 
+                    smem_base_A[(warp_row * WM + w_sub_row * W_SUB_M + lane_row * TM + i) * BK + 0]; // dot_idx = 0
+                    // tma_swizzle_128b_load<BK>(smem_base_A, warp_row * WM + w_sub_row * W_SUB_M + lane_row * TM + i, 0); // dot_idx = 0
             }
         }
         // Load B strip for dot_idx = 0 into the write stage register buffer
@@ -240,6 +251,7 @@ __global__ __launch_bounds__(BM * BN * 32 / (WM * WN)) void tma_double_buffered_
                     for (uint i = 0; i < TM; ++i) {
                         reg_M[reg_write_stage][w_sub_row * TM + i] =
                             smem_base_A[(warp_row * WM + w_sub_row * W_SUB_M + lane_row * TM + i) * BK + next_dot_idx];
+                            // tma_swizzle_128b_load<BK>(smem_base_A, warp_row * WM + w_sub_row * W_SUB_M + lane_row * TM + i, next_dot_idx);
                     }
                 }
 
@@ -330,6 +342,7 @@ void launch_tma_double_buffered_matmul(const float* __restrict__ d_A, const floa
         boxDimA,                    // boxDim
         elementStrides,             // elementStride
         CU_TENSOR_MAP_INTERLEAVE_NONE,
+        // CU_TENSOR_MAP_SWIZZLE_128B, // Use 128b swizzle, 16B chunks
         CU_TENSOR_MAP_SWIZZLE_NONE,
         CU_TENSOR_MAP_L2_PROMOTION_NONE,
         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE

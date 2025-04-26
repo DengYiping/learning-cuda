@@ -1,5 +1,5 @@
 NVCC = nvcc
-NVCCFLAGS = -O3 -std=c++20 -gencode=arch=compute_90,code=sm_90 -Xcompiler -Wall,-Wextra --generate-line-info -lcuda
+NVCCFLAGS = -O3 -std=c++20 -gencode=arch=compute_90,code=sm_90 -Xcompiler -Wall,-Wextra --generate-line-info -lcuda --expt-relaxed-constexpr
 
 all: naive_matmul coalesced_matmul sram_matmul 1d_block_tiling_matmul 2d_block_tiling_matmul vectorized_2d_block_tiling_matmul double_buffering_matmul async_global_to_shared_matmul tma_async_matmul tma_double_buffer_matmul sync_double_buffer_matmul sync_db_warp_matmul tma_async_matmul_wt tma_double_buffer_matmul_wt
 
