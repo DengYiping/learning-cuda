@@ -475,13 +475,364 @@ number of registers per thread (i.e. occupancy).
 In practice enabling double buffering with `cp.async` tends to improve a well
 tilled matmul kernel by another 1.2× – 1.4× on Ampere and Hopper GPUs.
 
-***Key take-aways***
+*** Key take-aways
 
-• Double buffering hides *compulsory* memory latency by building a tiny
+- Double buffering hides *compulsory* memory latency by building a tiny
   software pipeline.
-• Without async copies we rely on ILP to overlap the independent load and
+- Without async copies we rely on ILP to overlap the independent load and
   compute instructions; the overlap is partial but still worthwhile.
-• With async copies the overlap is explicit and nearly perfect, allowing the
+- With async copies the overlap is explicit and nearly perfect, allowing the
   kernel to sustain throughput very close to the theoretical FMAs/clock of the
   SM.
+
+** Tensor Memory Accelerator (TMA)
+
+Hopper GPUs (e.g., NVIDIA H100) introduce a dedicated hardware block called the
+Tensor Memory Accelerator (TMA) that can perform asynchronous 2D bulk copies
+between global memory and shared memory with minimal software overhead. We
+harness TMA in the `tma_async_matmul_wt`, `tma_double_buffer_matmul`, and
+`tma_double_buffer_matmul_wt` kernels by:
+
+- Defining a tiled view of the global A and B matrices via `CUtensorMap`
+  objects (created with `cuTensorMapEncodeTiled`) and marking them
+  `__grid_constant__` so every thread can access the map.
+- Allocating shared memory as one or two ping-pong buffers for A and B tiles.
+- Initializing a software barrier (`ptx::mbarrier_init`) and using
+  `ptx::mbarrier_arrive` / `ptx::mbarrier_wait_parity` to synchronize TMA
+  transfers.
+- Issuing TMA copy instructions with `ptx::cp_async_bulk_tensor_2d_global_to_shared`
+  on the master thread to enqueue the load of each tile into shared memory.
+- Overlapping copies and compute by prefetching the next tile
+  (`ptx::prefetch_async_bulk_tensor_2d_global_l2`) and double buffering
+  so while one tile is used in the MAC loop, the next tile is loading in
+  the other buffer.
+
+This TMA-based approach delivers near-peak shared-memory bandwidth and hides
+global memory latency behind ongoing computation, boosting performance
+beyond software-managed `cp.async` double buffering.
+
+** Benchmark results
+
+In the `faster-matmul` directory, run:
+
+#+begin_src bash
+  jovyan@na1-glad-hefty-peacock:~/learning-cuda/faster-matmul$ make run
+  echo "Running all kernels..."
+Running all kernels...
+./naive_matmul
+Running naive matrix multiplication benchmark:
+CPU matrix multiplication time: 12556.6 ms
+CPU Performance: 0.684097 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+5.393 -8.138 -1.575 
+-8.448 14.118 -4.260 
+14.764 -7.873 1.536 
+
+GPU result (3x3 section):
+5.393 -8.138 -1.575 
+-8.448 14.118 -4.260 
+14.764 -7.873 1.536 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 17.431 ms
+GPU Performance: 492.785 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 0.736%
+Performance vs cuBLAS: 1.069%
+GPU speedup over CPU: 720.344x
+./coalesced_matmul
+Running coalesced_matmul benchmark:
+CPU matrix multiplication time: 12423.8 ms
+CPU Performance: 0.691411 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+11.278 -2.002 -2.664 
+6.170 0.115 2.395 
+-8.149 11.153 9.138 
+
+GPU result (3x3 section):
+11.278 -2.002 -2.664 
+6.170 0.115 2.395 
+-8.149 11.153 9.138 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 1.368 ms
+GPU Performance: 6277.430 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 9.369%
+Performance vs cuBLAS: 13.615%
+GPU speedup over CPU: 9079.156x
+./sram_matmul
+Running sram bank conflict free matrix multiplication benchmark:
+CPU matrix multiplication time: 12815 ms
+CPU Performance: 0.670304 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+-5.738 -4.201 3.971 
+4.485 -5.746 -1.597 
+-7.161 7.278 -7.018 
+
+GPU result (3x3 section):
+-5.738 -4.201 3.971 
+4.485 -5.746 -1.597 
+-7.161 7.278 -7.018 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 1.002 ms
+GPU Performance: 8576.569 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 12.801%
+Performance vs cuBLAS: 18.602%
+GPU speedup over CPU: 12795.041x
+./1d_block_tiling_matmul
+Running 1d_block_tiling_matmul benchmark:
+CPU matrix multiplication time: 12745.8 ms
+CPU Performance: 0.673942 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+5.426 -5.151 0.558 
+-15.775 2.462 13.527 
+-1.143 -1.751 -8.095 
+
+GPU result (3x3 section):
+5.426 -5.151 0.558 
+-15.775 2.462 13.527 
+-1.143 -1.751 -8.095 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 0.446 ms
+GPU Performance: 19267.960 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 28.758%
+Performance vs cuBLAS: 41.790%
+GPU speedup over CPU: 28589.949x
+./2d_block_tiling_matmul
+Running 2d_block_tiling_matmul benchmark:
+CPU matrix multiplication time: 13247 ms
+CPU Performance: 0.648444 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+13.151 -4.849 -7.513 
+-0.237 -8.349 3.404 
+-5.974 1.799 -3.492 
+
+GPU result (3x3 section):
+13.151 -4.849 -7.513 
+-0.237 -8.349 3.404 
+-5.974 1.799 -3.492 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 0.379 ms
+GPU Performance: 22651.824 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 33.809%
+Performance vs cuBLAS: 49.130%
+GPU speedup over CPU: 34932.571x
+./vectorized_2d_block_tiling_matmul
+Device name: NVIDIA H100 80GB HBM3
+Shared memory size: 233472
+Shared memory size per block: 49152
+Running vectorized_2d_block_tiling_matmul benchmark:
+CPU matrix multiplication time: 12836.4 ms
+CPU Performance: 0.669186 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+9.713 1.889 -4.997 
+-2.961 -0.997 -5.971 
+4.361 -6.779 1.546 
+
+GPU result (3x3 section):
+9.713 1.889 -4.997 
+-2.961 -0.997 -5.971 
+4.361 -6.779 1.546 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 0.253 ms
+GPU Performance: 33890.370 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 50.583%
+Performance vs cuBLAS: 73.505%
+GPU speedup over CPU: 50644.193x
+./double_buffering_matmul
+Device name: NVIDIA H100 80GB HBM3
+Shared memory size: 233472
+Shared memory size per block: 49152
+Running double_buffering_matmul benchmark:
+CPU matrix multiplication time: 12287.6 ms
+CPU Performance: 0.699072 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+-5.296 -7.828 -2.811 
+8.230 10.311 5.018 
+-10.074 1.603 4.377 
+
+GPU result (3x3 section):
+-5.296 -7.828 -2.811 
+8.230 10.311 5.018 
+-10.074 1.603 4.377 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 0.256 ms
+GPU Performance: 33578.776 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 50.118%
+Performance vs cuBLAS: 72.829%
+GPU speedup over CPU: 48033.334x
+./async_global_to_shared_matmul
+Device name: NVIDIA H100 80GB HBM3
+Shared memory size: 233472
+Shared memory size per block: 49152
+Running async_global_to_shared_matmul benchmark:
+CPU matrix multiplication time: 12490.9 ms
+CPU Performance: 0.687693 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+-0.659 -8.166 -15.553 
+-12.705 24.062 -8.683 
+-6.847 2.344 2.973 
+
+GPU result (3x3 section):
+-0.659 -8.166 -15.553 
+-12.705 24.062 -8.683 
+-6.847 2.344 2.973 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 0.235 ms
+GPU Performance: 36535.749 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 54.531%
+Performance vs cuBLAS: 79.243%
+GPU speedup over CPU: 53127.976x
+./tma_async_matmul_wt
+Device name: NVIDIA H100 80GB HBM3
+Shared memory size per block: 233472
+Running Vectorized 2D block tiling (TMA with TensorMap) matrix multiplication benchmark:
+CPU matrix multiplication time: 12480.4 ms
+CPU Performance: 0.688272 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+8.061 -5.220 10.580 
+-9.024 -9.649 -9.406 
+3.887 -5.157 4.125 
+
+GPU result (3x3 section):
+8.061 -5.220 10.580 
+-9.024 -9.649 -9.406 
+3.887 -5.157 4.125 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 0.350 ms
+GPU Performance: 24553.896 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 36.648%
+Performance vs cuBLAS: 53.255%
+GPU speedup over CPU: 35674.680x
+./tma_double_buffer_matmul
+Device name: NVIDIA H100 80GB HBM3
+Shared memory size: 233472
+Shared memory size per block: 49152
+Device supports cooperative launch: Yes
+Device supports cluster launch: Yes
+Device async engine count: 3
+Required dynamic shared memory per block: 32768 bytes
+Required static shared memory per block: 8 bytes
+Running TMA Double Buffered matrix multiplication benchmark:
+CPU matrix multiplication time: 12983.6 ms
+CPU Performance: 0.661599 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+-13.161 -7.005 0.825 
+-3.210 0.293 -7.178 
+-23.658 0.868 8.105 
+
+GPU result (3x3 section):
+-13.161 -7.005 0.825 
+-3.210 0.293 -7.178 
+-23.658 0.868 8.105 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 0.225 ms
+GPU Performance: 38236.491 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 57.069%
+Performance vs cuBLAS: 82.931%
+GPU speedup over CPU: 57794.026x
+./tma_double_buffer_matmul_wt
+Device name: NVIDIA H100 80GB HBM3
+Shared memory size: 233472
+Shared memory size per block: 49152
+Device supports cooperative launch: Yes
+Device supports cluster launch: Yes
+Device async engine count: 3
+Required dynamic shared memory per block: 49152 bytes
+Required static shared memory per block: 8 bytes
+Running TMA Double Buffered matrix multiplication benchmark:
+CPU matrix multiplication time: 13090.8 ms
+CPU Performance: 0.656181 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+6.485 -18.253 7.287 
+4.670 -12.479 -4.622 
+3.702 -1.471 13.609 
+
+GPU result (3x3 section):
+6.485 -18.253 7.287 
+4.670 -12.479 -4.622 
+3.702 -1.471 13.609 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 0.204 ms
+GPU Performance: 42062.656 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 62.780%
+Performance vs cuBLAS: 91.230%
+GPU speedup over CPU: 64102.196x
+./sync_double_buffer_matmul
+Running sync_double_buffer_matmul benchmark:
+CPU matrix multiplication time: 12817.1 ms
+CPU Performance: 0.670191 GFLOPS
+Result mismatch at index 0: -12.2338 vs -2.53273
+Results DO NOT match between CPU and GPU!
+
+CPU result (3x3 section):
+-2.533 -0.276 -6.811 
+-2.668 -1.248 4.276 
+-17.296 2.712 -3.032 
+
+GPU result (3x3 section):
+-12.234 6.948 -2.774 
+-7.273 1.230 1.089 
+-0.081 -2.591 -0.035 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 0.352 ms
+GPU Performance: 24376.631 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 36.383%
+Performance vs cuBLAS: 52.871%
+GPU speedup over CPU: 36372.648x
+./sync_db_warp_matmul
+Running sync_db_warp_matmul benchmark:
+CPU matrix multiplication time: 12452 ms
+CPU Performance: 0.689845 GFLOPS
+Results match between CPU and GPU!
+
+CPU result (3x3 section):
+2.375 6.743 -9.502 
+-8.738 -1.612 8.453 
+-0.619 11.508 -0.835 
+
+GPU result (3x3 section):
+2.375 6.743 -9.502 
+-8.738 -1.612 8.453 
+-0.619 11.508 -0.835 
+Matrix dimensions: 4096x512 * 512x2048
+Average kernel execution time: 0.319 ms
+GPU Performance: 26962.451 GFLOPS
+GPU theoretical performance on H100: 67 teraFLOPS
+Performance vs theoretical max in percentage: 40.242%
+Performance vs cuBLAS: 58.479%
+GPU speedup over CPU: 39084.820x
+#
+#+end_src
 

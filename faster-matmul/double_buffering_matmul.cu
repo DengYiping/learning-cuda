@@ -212,7 +212,7 @@ int main() {
     int n = 2048; // Matrix B: k x n, Matrix C: m x n
     int k = 512;
     
-    std::cout << "Running Vectorized 2D block tiling matrix multiplication benchmark:" << std::endl;
+    std::cout << "Running double_buffering_matmul benchmark:" << std::endl;
     
     // Run the benchmark with the naive matrix multiplication kernel
     float avg_time = run_benchmark<float>(
