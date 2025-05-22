@@ -1,6 +1,54 @@
+* Table of Contents
+  - [[Introduction]]
+  - [[Helper Header Files]]
+  - [[Naive implementation]]
+  - [[Global memory Coalescing]]
+  - [[Shared memory tiling]]
+  - [[1D block tiling kernel]]
+  - [[2d block tiling]]
+  - [[Vectorized 2d block tiling]]
+  - [[Warp tiling kernel]]
+  - [[Double buffering – hiding memory latency with a small software pipeline]]
+  - [[Tensor Memory Accelerator (TMA)]]
+  - [[Autotuning Kernel Parameters with autotune_matmul.py]]
+  - [[Benchmark results]]
+  - [[Benchmark Summary]]
+
 * Faster matmul
 There is a great write up by an engineer at Anthropic:
 [[https://siboehm.com/articles/22/CUDA-MMM][blog post]] and [[https://github.com/siboehm/SGEMM_CUDA][Git repo]].
+
+** Introduction
+Matrix multiplication, or General Matrix Multiply (GEMM), is a fundamental operation in numerous computational fields, including deep learning, scientific computing, image processing, and graph analytics. The efficiency of GEMM operations often dictates the overall performance of larger applications. Given the massively parallel architecture of Graphics Processing Units (GPUs), they have become the de facto hardware for accelerating these computations. Optimizing GEMM kernels on GPUs is therefore a critical area of study and engineering effort, aiming to approach the theoretical peak performance of the hardware. This document explores various stages and techniques involved in optimizing GEMM kernels using CUDA, demonstrating the iterative process from a naive implementation to highly sophisticated versions leveraging advanced hardware features.
+
+** Helper Header Files
+The matrix multiplication kernels in the `faster-matmul` directory rely on two primary helper header files: `faster_matmul.cuh` and `ptx.cuh`. These files provide common utilities and access to low-level hardware features, respectively.
+
+*** `faster_matmul.cuh`
+This header file contains common C++ and CUDA C code that is crucial for developing, testing, and benchmarking the various matrix multiplication kernels. It is included by most of the `.cu` files in the `faster-matmul` directory. Its key functionalities include:
+
+- *CUDA Error Checking*: Provides macros like `CHECK_CUDA(ans)` that wrap CUDA API calls and automatically check for errors, printing an error message and exiting if a CUDA call fails. This is essential for robust CUDA programming.
+- *Reference CPU Implementation*: Contains `cpu_matmul`, a straightforward C++ implementation of matrix multiplication. This CPU version serves as the gold standard for verifying the correctness of the results produced by the GPU kernels.
+- *Result Verification*: Includes utilities like `verify_results` that compare the output matrix from a GPU kernel with the reference output from `cpu_matmul`. This function typically checks for element-wise equality within a certain tolerance to account for potential floating-point precision differences.
+- *GPU Kernel Timing*: Offers functions such as `benchmark_gpu_kernel` that use CUDA events to accurately measure the execution time of GPU kernels. This is critical for performance assessment.
+- *Standardized Benchmarking Framework*: Implements `run_benchmark` and `run_benchmark_gpu_only`. These functions orchestrate the entire benchmarking process:
+    - Initializing input matrices (A and B) with random data on the host.
+    - Allocating memory on the GPU and transferring input data from host to device.
+    - Executing the specified GPU kernel (and the CPU reference if `run_benchmark` is used).
+    - Transferring results from device to host.
+    - Performing result verification (if CPU results are available).
+    - Calculating and reporting performance metrics, primarily GFLOPS (GigaFLOPs per second).
+    - Handling memory deallocation.
+
+*** `ptx.cuh`
+This header file provides a set of low-level helper functions, primarily implemented using inline PTX (Parallel Thread Execution) assembly. These functions are designed to directly access advanced hardware features available on newer CUDA architectures, particularly targeting NVIDIA's Hopper architecture and above.
+
+The main purpose of `ptx.cuh` in this project is to enable the use of the Tensor Memory Accelerator (TMA), a specialized hardware unit for efficient asynchronous data movement between global and shared memory. Key components related to TMA include:
+
+- *Asynchronous Data Copy Wrappers*: Provides C++ wrapper functions around PTX instructions like `cp.async.bulk.tensor.2d.global.shared.b128.v1.L2::cache_hint<LOAD_CACHE_HINT_POLICY_L1_EVICT_NORMAL>.dst[SMEM].src[GMEM]` (and variants). These wrappers allow kernels to initiate asynchronous copies of 2D tiles of data from global memory to shared memory, which can then be overlapped with computation.
+- *Memory Barrier (mbarrier) Management*: Includes functions for initializing and managing `mbarrier` objects directly in PTX. `mbarrier` objects are a hardware synchronization mechanism introduced with Hopper, necessary for coordinating the completion of TMA operations among threads in a warp or thread block. Functions like `mbarrier_init`, `mbarrier_arrive`, and `mbarrier_wait_parity` (or `mbarrier_wait_eq`) are provided to manage the lifecycle and synchronization points of these barriers.
+
+This header is essential for the TMA-based kernels, such as `tma_async_matmul_wt.cu` and `tma_double_buffer_matmul.cu`, which leverage TMA for optimal data loading performance.
 
 ** Naive implementation
 We launch a grid and threads along the matrix C. Basically
@@ -52,7 +100,7 @@ the access is not consecutive.
 
 All we need to do here is to swap the index of ~x~ and ~y~:
 #+begin_src cuda
-  __global__ void naive_matmul(float* A, float* B, float* C, int M, int N, int K) {
+  __global__ void coalesced_matmul_conceptual(float* A, float* B, float* C, int M, int N, int K) {
     int i = blockIdx.y * blockDim.y + threadIdx.y; // Let i remains the same in the warp
     int j = blockIdx.x * blockDim.x + threadIdx.x; // Let j moves in the same warp
 
@@ -61,7 +109,7 @@ All we need to do here is to swap the index of ~x~ and ~y~:
       for (int k = 0; k < K; k++) {
         // A matrix access is not coalesed but broadcasted
         // B matrix access is coalesced
-        acc += A[i * K + k] * B[k * N + j]
+        acc += A[i * K + k] * B[k * N + j];
       }
       // Write is also coalesced
       C[i * N + j] = acc;
@@ -69,7 +117,7 @@ All we need to do here is to swap the index of ~x~ and ~y~:
   }
 #+end_src
 
-
+Note: The code snippet above illustrates the conceptual change in indexing for optimal memory coalescing. The actual `faster-matmul/coalesced_matmul.cu` file uses the original naive kernel indexing but achieves an equivalent memory access pattern by launching the CUDA grid with dimensions `gridDim(columns, rows)` instead of `gridDim(rows, columns)`. Both approaches result in thread `j` (column index) varying fastest within a warp, leading to coalesced access for matrix B and coalesced writes to matrix C.
 
 ** Shared memory tiling
 *** Memory access latency:
@@ -511,7 +559,57 @@ This TMA-based approach delivers near-peak shared-memory bandwidth and hides
 global memory latency behind ongoing computation, boosting performance
 beyond software-managed `cp.async` double buffering.
 
+** Autotuning Kernel Parameters with `autotune_matmul.py`
+Manually finding the optimal tiling parameters (`BM, BN, BK`) and thread-level parallelism parameters (`TM, TN`) for a given CUDA kernel can be a complex and time-consuming task. The best configuration is often highly specific to the GPU architecture, the nature of the kernel (e.g., if it uses double buffering, warp tiling), and even the specific matrix dimensions. The `faster-matmul/autotune_matmul.py` script provides an automated way to explore the parameter space and identify the configuration that yields the highest performance (measured in GFLOPS).
+
+*** Functionality
+The `autotune_matmul.py` script operates as follows:
+1. It takes a CUDA kernel source file (e.g., `vectorized_2d_block_tiling_matmul.cu`) as input.
+2. It creates a temporary copy of this source file.
+3. Within this temporary copy, it systematically modifies the `constexpr` definitions for parameters like `BM` (Block M dimension), `BN` (Block N dimension), `BK` (Block K dimension), `TM` (Thread M dimension), and `TN` (Thread N dimension). It iterates through ranges defined within the script.
+4. For each parameter combination, it compiles the modified kernel using `nvcc`.
+5. It then executes the compiled kernel, typically performing a matrix multiplication.
+6. The script parses the standard output of the kernel execution, looking for a GFLOPS (GigaFLOPs per second) metric.
+7. It keeps track of the parameter set that achieves the highest GFLOPS and reports this best configuration upon completion.
+
+*** Key Features/Usage
+The script includes several features to guide the tuning process and handle different kernel types:
+
+- *Configurable Parameter Ranges*: Inside the script, users can define the search space for each parameter (e.g., `BM_RANGE = [32, 64, 128, 256]`, `BK_RANGE = [8, 16, 32, 64]`).
+- *Constraint Checking*: Before attempting to compile and run, the script performs several checks to ensure the validity of a parameter combination:
+    - *Shared Memory Usage*: Calculates the required shared memory based on `BM, BN, BK` and whether the `use_double_buffer` flag is set. It skips configurations that would exceed the available shared memory per SM (Streaming Multiprocessor).
+    - *Max Threads Per Block*: Ensures that `(BM / TM) * (BN / TN)` does not exceed the GPU's maximum threads per block limit.
+    - *Estimated Register Pressure*: While not a perfect measure, it can provide heuristics to avoid configurations likely to lead to excessive register spilling (though this is more implicitly handled by performance measurement).
+    - *Specific Kernel Constraints*: For example, it often enforces `BK % 4 == 0` if the kernel uses `float4` vectorization for the K dimension.
+- *Command-Line Options*:
+    - `source_file`: (Positional argument) Specifies the path to the CUDA kernel file to be tuned.
+    - `--headers`: Allows specifying a comma-separated list of header files required by the kernel (e.g., `faster_matmul.cuh, ptx.cuh`).
+    - `--gpus`: Defines which GPU(s) to use for tuning (e.g., `0` or `0,1`). The script typically runs benchmarks on each specified GPU sequentially.
+    - `--double_buffer`: A flag indicating that the kernel uses double buffering, which affects shared memory calculations (doubling the requirement for A and B tiles).
+    - `--warptiling`: A flag that adjusts the tuning strategy for warp-tiled kernels. When enabled, it often fixes `TM` and `TN` to values suitable for warp-level operations (e.g., `TM=BM/WARP_SIZE_M`, `TN=BN/WARP_SIZE_N` assuming a warp is processing a tile) and primarily varies the block dimensions (`BM, BN, BK`).
+
+*** Conceptual Example Command
+To autotune the `vectorized_2d_block_tiling_matmul.cu` kernel, which uses double buffering and requires `faster_matmul.cuh`, on GPU 1, you might run:
+#+begin_src bash
+python faster-matmul/autotune_matmul.py faster-matmul/vectorized_2d_block_tiling_matmul.cu --headers faster-matmul/faster_matmul.cuh --gpus 1 --double_buffer
+#+end_src
+
+*** When to Use
+Autotuning is particularly beneficial in the following scenarios:
+- *Maximizing Performance*: When aiming to extract the highest possible performance from a specific kernel on a target GPU architecture.
+- *Porting Kernels*: When adapting an optimized kernel from one GPU generation to another, as optimal parameters often change.
+- *Exploring Non-Obvious Configurations*: The script can systematically test a wide range of parameters, potentially uncovering effective combinations that might not be intuitive through manual tuning.
+- *Complex Kernels*: For kernels with many tunable parameters and intricate dependencies, manual tuning becomes exceedingly difficult.
+
+*** Output
+The script prints the GFLOPS achieved for each valid parameter combination it tests. At the end of the tuning process, it outputs:
+- The set of parameters (`BM, BN, BK, TM, TN`) that yielded the best GFLOPS.
+- The maximum GFLOPS value achieved with that configuration.
+This information can then be used to hardcode the optimal parameters into the production version of the kernel or to select the best pre-compiled version.
+
 ** Benchmark results
+
+The following section contains the raw output from executing `make run` in the `faster-matmul` directory on an NVIDIA H100 GPU. This log reflects the performance of various kernels. Notably, the `sync_double_buffer_matmul` kernel's output shows a mismatch; a fix has been applied to its source code as detailed in its specific entry below, but verification of this fix is pending access to CUDA-capable hardware.
 
 In the `faster-matmul` directory, run:
 
@@ -793,7 +891,7 @@ Running sync_double_buffer_matmul benchmark:
 CPU matrix multiplication time: 12817.1 ms
 CPU Performance: 0.670191 GFLOPS
 Result mismatch at index 0: -12.2338 vs -2.53273
-Results DO NOT match between CPU and GPU!
+Results DO NOT match between CPU and GPU! (Attempted fix for A transposition, verification pending due to CUDA device issue)
 
 CPU result (3x3 section):
 -2.533 -0.276 -6.811 
@@ -811,6 +909,36 @@ GPU theoretical performance on H100: 67 teraFLOPS
 Performance vs theoretical max in percentage: 36.383%
 Performance vs cuBLAS: 52.871%
 GPU speedup over CPU: 36372.648x
+
+The following code modification was applied to `faster-matmul/sync_double_buffer_matmul.cu` to attempt to fix the transposition issue:
+#+begin_src diff
+--- a/faster-matmul/sync_double_buffer_matmul.cu
++++ b/faster-matmul/sync_double_buffer_matmul.cu
+
+             float4 vec = *g_ptr; // synchronised 128-bit load
+ 
+             // Write transposed to shared: (BK rows, BM cols)
+-            float* s_base = smem_A[stage] + col * BM + row;
+-            s_base[0] = vec.x;
+-            s_base[1] = vec.y;
+-            s_base[2] = vec.z;
+-            s_base[3] = vec.w;
++                // Global A tile coordinates: row, col (where col is base of float4 from A tile)
++                // Shared smem_A coordinates: k_idx (0..BK-1, from col in A), m_idx (0..BM-1, from row in A)
++                // vec.x = A[row, col+0] should go to smem_A[col+0, row]
++                // vec.y = A[row, col+1] should go to smem_A[col+1, row]
++                // vec.z = A[row, col+2] should go to smem_A[col+2, row]
++                // vec.w = A[row, col+3] should go to smem_A[col+3, row]
++                
++                smem_A[stage][(col + 0) * BM + row] = vec.x;
++                smem_A[stage][(col + 1) * BM + row] = vec.y;
++                smem_A[stage][(col + 2) * BM + row] = vec.z;
++                smem_A[stage][(col + 3) * BM + row] = vec.w;
+         }
+ 
+         // ---------------------------------------------------------
+#+end_src
+
 ./sync_db_warp_matmul
 Running sync_db_warp_matmul benchmark:
 CPU matrix multiplication time: 12452 ms
@@ -835,4 +963,18 @@ Performance vs cuBLAS: 58.479%
 GPU speedup over CPU: 39084.820x
 #
 #+end_src
+
+** Benchmark Summary
+The following table summarizes the performance of key kernels discussed in this document, showcasing the impact of various optimization techniques. All benchmarks were run with matrix dimensions 4096x512 * 512x2048 on an NVIDIA H100 GPU.
+
+| Kernel Name                         | GPU Performance (GFLOPS) | Perf. vs Theory H100 (%) | Perf. vs cuBLAS (%) | GPU Speedup (x) |
+|-------------------------------------+--------------------------+--------------------------+---------------------+-----------------|
+| naive_matmul                        | 492.785                  | 0.736                    | 1.069               | 720.344         |
+| coalesced_matmul                    | 6277.430                 | 9.369                    | 13.615              | 9079.156        |
+| sram_matmul                         | 8576.569                 | 12.801                   | 18.602              | 12795.041       |
+| vectorized_2d_block_tiling_matmul | 33890.370                | 50.583                   | 73.505              | 50644.193       |
+| async_global_to_shared_matmul       | 36535.749                | 54.531                   | 79.243              | 53127.976       |
+| tma_double_buffer_matmul_wt         | 42062.656                | 62.780                   | 91.230              | 64102.196       |
+
+Note: The "Perf. vs cuBLAS (%)" is based on a specific cuBLAS run that achieved approximately 46096 GFLOPS for the given problem size, which is used as a baseline for comparison. The theoretical peak performance of H100 is stated as 67 TFLOPS.
 

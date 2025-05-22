@@ -95,11 +95,17 @@ __global__ void sync_double_buffer_matmul_kernel(
             float4 vec = *g_ptr; // synchronised 128-bit load
 
             // Write transposed to shared: (BK rows, BM cols)
-            float* s_base = smem_A[stage] + col * BM + row;
-            s_base[0] = vec.x;
-            s_base[1] = vec.y;
-            s_base[2] = vec.z;
-            s_base[3] = vec.w;
+                // Global A tile coordinates: row, col (where col is base of float4 from A tile)
+                // Shared smem_A coordinates: k_idx (0..BK-1, from col in A), m_idx (0..BM-1, from row in A)
+                // vec.x = A[row, col+0] should go to smem_A[col+0, row]
+                // vec.y = A[row, col+1] should go to smem_A[col+1, row]
+                // vec.z = A[row, col+2] should go to smem_A[col+2, row]
+                // vec.w = A[row, col+3] should go to smem_A[col+3, row]
+                
+                smem_A[stage][(col + 0) * BM + row] = vec.x;
+                smem_A[stage][(col + 1) * BM + row] = vec.y;
+                smem_A[stage][(col + 2) * BM + row] = vec.z;
+                smem_A[stage][(col + 3) * BM + row] = vec.w;
         }
 
         // ---------------------------------------------------------
