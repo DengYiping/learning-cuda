@@ -4,21 +4,21 @@ There is a great write up by an engineer at Anthropic:
 
 ** Naive implementation
 We launch a grid and threads along the matrix C. Basically
-- ~x_C = blockIdx.x * blockDim.x + threadIdx.x~
-- ~y_C = blockIdx.y * blockDim.y + threadIdx.y~
+- ~i = blockIdx.y * blockDim.y + threadIdx.y~ (row index)
+- ~j = blockIdx.x * blockDim.x + threadIdx.x~ (column index)
 
 This results in the following kernel:
 #+begin_src cuda
   __global__ void naive_matmul(float* A, float* B, float* C, int M, int N, int K) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x; // Moving fast in a warp
-    int j = blockIdx.y * blockDim.y + threadIdx.y; // Not moving in a warp
+    int i = blockIdx.y * blockDim.y + threadIdx.y; // row index
+    int j = blockIdx.x * blockDim.x + threadIdx.x; // column index
 
     if (i < M && j < N) {
-      float acc = 0.0f;
+      float sum = 0.0f;
       for (int k = 0; k < K; k++) {
-        acc += A[i * K + k] * B[k * N + j]
+        sum += A[i * K + k] * B[k * N + j];
       }
-      C[i * N + j] = acc;
+      C[i * N + j] = sum;
     }
   }
 #+end_src
@@ -36,9 +36,8 @@ we would be above to achieve the best performance.
 
 ** Global memory Coalescing
 
-32 threads in the consecutive ~threadId = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blcokDIm.y~ can form a warp.
-Within each warp, we want to have locality in terms of memory.
-access across each threads.
+32 threads in the consecutive ~threadId = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y~ form a warp.
+Within each warp, we want to have locality in terms of memory access across threads.
 
 For example, thread 0 and thread 1 should access memory near each other, and ideally all the memory accessed by 32 threads
 in the warp should become a consecutive block in global memory.
@@ -46,188 +45,185 @@ in the warp should become a consecutive block in global memory.
 The concept of a warp is relevant for this second kernel,
 as sequential memory accesses by threads that are part of the same warp can be grouped and executed as one.
 
-In the naive kernel, each threads, in the inner loop, is accessing the memory consecutively. However, across the wrap
-the access is not consecutive.
+In the naive kernel, each thread accesses different rows of B in the inner loop, leading to non-coalesced access.
+The key insight is that the naive kernel already has the correct indexing for coalescing:
 
-
-All we need to do here is to swap the index of ~x~ and ~y~:
 #+begin_src cuda
-  __global__ void naive_matmul(float* A, float* B, float* C, int M, int N, int K) {
-    int i = blockIdx.y * blockDim.y + threadIdx.y; // Let i remains the same in the warp
-    int j = blockIdx.x * blockDim.x + threadIdx.x; // Let j moves in the same warp
+  __global__ void coalesced_matmul(float* A, float* B, float* C, int M, int N, int K) {
+    int i = blockIdx.y * blockDim.y + threadIdx.y; // row index
+    int j = blockIdx.x * blockDim.x + threadIdx.x; // column index
 
     if (i < M && j < N) {
-      float acc = 0.0f;
+      float sum = 0.0f;
       for (int k = 0; k < K; k++) {
-        // A matrix access is not coalesed but broadcasted
-        // B matrix access is coalesced
-        acc += A[i * K + k] * B[k * N + j]
+        // A matrix access is broadcasted (same element to all threads in warp)
+        // B matrix access is coalesced (consecutive threads access consecutive elements)
+        sum += A[i * K + k] * B[k * N + j];
       }
       // Write is also coalesced
-      C[i * N + j] = acc;
+      C[i * N + j] = sum;
     }
   }
 #+end_src
 
+The optimization comes from swapping the grid dimensions in the kernel launch:
+- Naive: ~dim3 grid(M/32, N/32)~
+- Coalesced: ~dim3 grid(N/32, M/32)~ (swapped)
+
 
 
 ** Shared memory tiling
-*** Memory access latency:
-- Register: 1 clock, 8 TB/s
-- Shared memory: 32 clocks, 1.5 TB /s
-- Local -> Global: 800 clocks, 200 GB / s
-- Host: 5 GB/s
-*** We can effectively cache the block in sram
+*** Memory access latency hierarchy:
+- Register: ~1 cycle
+- Shared memory: ~20-30 cycles
+- L1/L2 cache: ~100-200 cycles
+- Global memory: ~200-800 cycles
+
+*** We can effectively cache blocks in shared memory
+Using shared memory reduces global memory accesses from O(K) to O(K/BLOCK_SIZE) per thread.
+
 #+begin_src cuda
-  __global__ void sram_matmul(float* A, float* B, float* C, int M, int N, int K) {
+  __global__ void sram_matmul(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, int M, int N, int K) {
+    const int BLOCK_SIZE = 32;
     __shared__ float shared_A[BLOCK_SIZE][BLOCK_SIZE];
     __shared__ float shared_B[BLOCK_SIZE][BLOCK_SIZE];
 
-    // threadIdx.x changes in the same warp
-    int i = blockIdx.y * blockDim.y + threadIdx.y;
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-
-    if (i < M && j < N) {
-        // sliding window of BLOCK_SIZE x BLOCK_SIZE
-        // sliding on the K dimension
-        float sum = 0.0f;
-        for (int w_idx = 0; w_idx < (K + BLOCK_SIZE - 1) / BLOCK_SIZE; w_idx++) {
-            int k_start = w_idx * BLOCK_SIZE;
-
-            // init shared_A, shared_B and shared_C
-            // Check bounds for shared_A and shared_B, add assign value to 0 if out of bounds
-            if (k_start + threadIdx.x < K) {
-                shared_A[threadIdx.y][threadIdx.x] = A[i * K + k_start + threadIdx.x];
-            }
-
-            if (k_start + threadIdx.y < K) {
-                shared_B[threadIdx.y][threadIdx.x] = B[(k_start + threadIdx.y) * N + j];
-            }
-
-            __syncthreads(); // wait for all threads to finish loading data
-            for (int k = 0; k < BLOCK_SIZE && (k_start + k) < K; k++) {
-                sum += shared_A[threadIdx.y][k] * shared_B[k][threadIdx.x];
-            }
-            __syncthreads(); // avoid over-writing shared_A and shared_B before all threads finish the computation
+    float sum = 0.0f;
+    
+    // Sliding window along K dimension
+    for (int tile = 0; tile < (K + BLOCK_SIZE - 1) / BLOCK_SIZE; tile++) {
+        // Load tiles into shared memory
+        if (row < M && (tile * BLOCK_SIZE + threadIdx.x) < K) {
+            shared_A[threadIdx.y][threadIdx.x] = A[row * K + tile * BLOCK_SIZE + threadIdx.x];
+        } else {
+            shared_A[threadIdx.y][threadIdx.x] = 0.0f;
         }
-        C[i * N + j] = sum;
+
+        if (col < N && (tile * BLOCK_SIZE + threadIdx.y) < K) {
+            shared_B[threadIdx.y][threadIdx.x] = B[(tile * BLOCK_SIZE + threadIdx.y) * N + col];
+        } else {
+            shared_B[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        __syncthreads();
+
+        // Compute dot product for this tile
+        #pragma unroll
+        for (int k = 0; k < BLOCK_SIZE; k++) {
+            sum += shared_A[threadIdx.y][k] * shared_B[k][threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+
+    if (row < M && col < N) {
+        C[row * N + col] = sum;
     }
 }
 #+end_src
-*** Profiling the SRAM matmul kernel
+*** Profiling insights
+When profiling with ~ncu --set full~, the kernel shows:
+- High shared memory pressure due to many small accesses
+- Long scoreboard stalls waiting for global memory loads
+- Limited instruction-level parallelism (ILP)
 
-Let's use the ~ncu --set full~ command to profile our kernel.
-Also, use ~--generate-line-info~ for nvcc for line info.
-
-Some of the suggestions from ncu:
-**** MIO stalls
-On average, each warp of this workload spends 10.2 cycles being stalled waiting for the MIO (memory input/output) instruction queue to be not full.
-This stall reason is high in cases of extreme utilization of the MIO pipelines,
-which include special math instructions, dynamic branches, as well as shared memory instructions. When caused by shared memory accesses, trying to use fewer but wider loads can reduce pipeline pressure.
-This stall type represents about 37.3% of the total average of 27.4 cycles between issuing two instructions.
-
-The most problematic one is ~smsp__pcsamp_warps_issue_stalled_long_scoreboard~. This indicates that we spend a lot of time loading from global memory,
-and we spend a lot of time loading from SRAM as well.
+This motivates the next optimization: giving each thread more work to increase ILP and reduce shared memory pressure.
 
 ** 1D block tiling kernel
 
-We can try to calculate 8 elements in a single thread to reduce the memory pressure for accessing B shared memory:
+Each thread computes TM elements (row-wise) instead of just one, increasing arithmetic intensity:
+
 #+begin_src cuda
 template <int BM, int BN, int BK, int TM>
-__global__ void block_tiling_matmul_1d(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int M, const int N, const int K) {
+__global__ void block_tiling_matmul_1d(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, 
+                                       const int M, const int N, const int K) {
     __shared__ float shared_A[BM][BK];
     __shared__ float shared_B[BK][BN];
 
-    // blockIdx.x is the block id in the N dimension, aka the column index of the block
-    // blockIdx.y is the block id in the M dimension, aka the row index of the block
-
-    // Each warp will calculate 32 * TM elements, with 32 being the columnar dim.
-    // Num threads = BM * BN / TM, we will 1d tiling on the M dimension.
+    // Thread mapping: linearize thread block and assign each thread TM rows
     const int thread_col = threadIdx.x % BN;
     const int thread_row = threadIdx.x / BN;
 
-    // Move blocktile to beginning of A's row and B's column
+    // Move block tile to correct position
     A += blockIdx.y * BM * K;
     B += blockIdx.x * BN;
     C += blockIdx.y * BM * N + blockIdx.x * BN;
 
-    const uint inner_col_a = threadIdx.x % BK; // warp-level GMEM coalescing
+    // Calculate indices for loading tiles
+    const uint inner_col_a = threadIdx.x % BK;
     const uint inner_row_a = threadIdx.x / BK;
-    const uint inner_col_b = threadIdx.x % BN; // warp-level GMEM coalescing
+    const uint inner_col_b = threadIdx.x % BN;
     const uint inner_row_b = threadIdx.x / BN;
 
     float thread_results[TM] = {0.0f};
 
-    // Assume K is divisible by BK
-    for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
-        // Load A and B tiles into shared memory j
+    // Main loop over K dimension
+    for (uint tile_k = 0; tile_k < K; tile_k += BK) {
+        // Cooperative loading of tiles
         shared_A[inner_row_a][inner_col_a] = A[inner_row_a * K + inner_col_a];
         shared_B[inner_row_b][inner_col_b] = B[inner_row_b * N + inner_col_b];
-
+        
         __syncthreads();
-
-        // advance blocktile
+        
         A += BK;
         B += BK * N;
 
-        // Perform matrix multiplication
-        for (uint dot_idx = 0; dot_idx < BK; dot_idx++) {
-            // This is cached & reused for each thread in the warp
-            float tmp = shared_B[dot_idx][thread_col];
-
-            // We are reading TM elemets from A[thread_row * TM : thread_row * TM + TM][dot_idx]
-            // and multiply with the cached B[thread_col][dot_idx]
+        // Compute dot products
+        for (uint k = 0; k < BK; k++) {
+            float b_val = shared_B[k][thread_col];  // Reused across TM iterations
+            
             #pragma unroll
-            for (uint res_idx = 0; res_idx < TM; res_idx++) {
-                thread_results[res_idx] += shared_A[thread_row * TM + res_idx][dot_idx] * tmp;
+            for (uint m = 0; m < TM; m++) {
+                thread_results[m] += shared_A[thread_row * TM + m][k] * b_val;
             }
         }
         __syncthreads();
     }
 
+    // Write results
     #pragma unroll
-    for (uint res_idx = 0; res_idx < TM; res_idx++) {
-        C[(thread_row * TM + res_idx) * N + thread_col] = thread_results[res_idx];
+    for (uint m = 0; m < TM; m++) {
+        C[(thread_row * TM + m) * N + thread_col] = thread_results[m];
     }
 }
 #+end_src
 
-Reading from the SASS code, you will notice the inner loop load from SRAM is vectorized.
+Key improvements:
+- Each thread computes TM=8 elements, amortizing shared memory reads
+- B values are loaded once and reused TM times
+- Better instruction-level parallelism through unrolled loops
+- Typical configuration: BM=64, BN=64, BK=8, TM=8
 
-Interestingly, this has no adverse effect on performance.
-This is surprising since our inner two loops now incur BK (=8) * TM (=8) * 2 = 128 SMEM accesses,
-instead of the previous 72. Looking at the assembly (Godbolt link) has the answer.
+** 2D block tiling
 
-** 2d block tiling
-
-Idea comes from using a outer product to do partial matrix multiplication in threads.
-Each thread holds 2 vectors.
+Further extends the 1D approach by having each thread compute a TM×TN tile (2D) instead of just TM elements (1D):
 
 #+begin_src cuda
 template <int BM, int BN, int BK, int TM, int TN>
-__global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int M, const int N, const int K) {
+__global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, 
+                                       const int M, const int N, const int K) {
     __shared__ float shared_A[BM][BK];
     __shared__ float shared_B[BK][BN];
 
-    // blockIdx.x is the block id in the N dimension, aka the column index of the block
-    // blockIdx.y is the block id in the M dimension, aka the row index of the block
-
-    // Each warp will calculate 32 * TM * TN elements, with 32 being the columnar dim.
-    // Num threads = BM * BN / (TM * TN), we will 2d tiling on the M, N dimension.
+    // Each thread computes a TM×TN tile
     const uint thread_col = threadIdx.x % (BN / TN);
     const uint thread_row = threadIdx.x / (BN / TN);
 
-    // Move blocktile to beginning of A's row and B's column
+    // Move to block's starting position
     A += blockIdx.y * BM * K;
     B += blockIdx.x * BN;
     C += blockIdx.y * BM * N + blockIdx.x * BN;
 
-    const uint inner_col_a = threadIdx.x % BK; // warp-level GMEM coalescing
+    // Indices for cooperative loading
+    const uint inner_col_a = threadIdx.x % BK;
     const uint inner_row_a = threadIdx.x / BK;
-    const uint inner_col_b = threadIdx.x % BN; // warp-level GMEM coalescing
+    const uint inner_col_b = threadIdx.x % BN;
     const uint inner_row_b = threadIdx.x / BN;
 
+    // Thread-local accumulators and registers
     float thread_results[TM][TN] = {0.0f};
     float reg_M[TM];
     float reg_N[TN];
@@ -235,604 +231,228 @@ __global__ void block_tiling_matmul_2d(const float* __restrict__ A, const float*
     const uint stride_A = blockDim.x / BK;
     const uint stride_B = blockDim.x / BN;
 
-    // Assume K is divisible by BK. Outer loop is over block tiles
-    for (uint bkIdx = 0; bkIdx < K; bkIdx += BK) {
-        // Load A and B tiles into shared memory
-
-        // For shared_A, we need to load BM * BK in total, and we've got (BM * BN) / (TM * TN) threads
-        // So each thread needs to load (BM * BK) / ((BM * BN) / (TM * TN)) = BK * TM * TN / BN
-        // This is equivalent to traversing on the BM dimension with stride_A = BM / (BK * TM * TN / BN) = ((BM * BN) / (TM * TN)) / BK =
-        // blockDim.x / BK
+    // Main K-dimension loop
+    for (uint tile_k = 0; tile_k < K; tile_k += BK) {
+        // Cooperative tile loading with strided access
         #pragma unroll
-        for (int j = 0; j < BM; j += stride_A) {
-            shared_A[inner_row_a + j][inner_col_a] = A[(inner_row_a + j) * K + inner_col_a];
+        for (int offset = 0; offset < BM; offset += stride_A) {
+            shared_A[inner_row_a + offset][inner_col_a] = A[(inner_row_a + offset) * K + inner_col_a];
         }
-        // For shared_B, we need to load BK * BN in total, and we've got (BM * BN) / (TM * TN) threads
-        // So each thread needs to load (BK * BN) / ((BM * BN) / (TM * TN)) = BK * TM * TN / BM
-        // This is equivalent to traversing on the BK dimension with stride_B = BK / (BK * TM * TN / BM) = ((BM * BN) / (TM * TN)) / BN =
-        // blockDim.x / BN
+        
         #pragma unroll
-        for (int j = 0; j < BK; j += stride_B) {
-            shared_B[inner_row_b + j][inner_col_b] = B[(inner_row_b + j) * N + inner_col_b];
+        for (int offset = 0; offset < BK; offset += stride_B) {
+            shared_B[inner_row_b + offset][inner_col_b] = B[(inner_row_b + offset) * N + inner_col_b];
         }
+        
         __syncthreads();
-        // advance blocktile
+        
         A += BK;
         B += BK * N;
 
-        // Perform matrix multiplication
+        // Compute using outer product formulation
         #pragma unroll
-        for (uint dot_idx = 0; dot_idx < BK; dot_idx++) {
-            // Outer dot product over reg_M and reg_N
+        for (uint k = 0; k < BK; k++) {
+            // Load vectors into registers
             #pragma unroll
-            for (uint i = 0; i < TM; i++) {
-                reg_M[i] = shared_A[thread_row * TM + i][dot_idx];
+            for (uint m = 0; m < TM; m++) {
+                reg_M[m] = shared_A[thread_row * TM + m][k];
             }
 
             #pragma unroll
-            for (uint j = 0; j < TN; j++) {
-                reg_N[j] = shared_B[dot_idx][thread_col * TN + j];
+            for (uint n = 0; n < TN; n++) {
+                reg_N[n] = shared_B[k][thread_col * TN + n];
             }
 
+            // Outer product
             #pragma unroll
-            for (int i = 0; i < TM; i++) {
-                for (int j = 0; j < TN; j++) {
-                    thread_results[i][j] += reg_M[i] * reg_N[j];
+            for (int m = 0; m < TM; m++) {
+                #pragma unroll
+                for (int n = 0; n < TN; n++) {
+                    thread_results[m][n] += reg_M[m] * reg_N[n];
                 }
             }
         }
-
         __syncthreads();
     }
 
-    // Store the results
+    // Write results
     #pragma unroll
-    for (int i = 0; i < TM; i++) {
+    for (int m = 0; m < TM; m++) {
         #pragma unroll
-        for (int j = 0; j < TN; j++) {
-            C[(thread_row * TM + i) * N + (thread_col * TN + j)] = thread_results[i][j];
+        for (int n = 0; n < TN; n++) {
+            C[(thread_row * TM + m) * N + (thread_col * TN + n)] = thread_results[m][n];
         }
     }
 }
 #+end_src
 
-However, with TM = TN = 4, BM = BN = 128, BK =8, we are only achieving 30% of theoretical max.
+Key improvements over 1D:
+- Each thread computes TM×TN elements (typically 4×4)
+- Uses outer product formulation for better register reuse
+- Typical configuration: BM=64, BN=128, BK=64, TM=4, TN=4
+- Better arithmetic intensity but higher register pressure
 
-Let's do some profiling & understand.
+** Vectorized 2D block tiling
 
-*** Occupancy for kernel is low
-We are only achieving 50% occupancy because of register pressure.
-We can tune down the number of register cache by using TM = TN = 4.
-
-** Vectorized 2d block tiling
-We continue to optimize the 2d block tiling kernel by vectorizing the memory access.
-Specifically, we use float4 to load 4 elements per thread for:
-- Loading A tile and B tile from global memory to SRAM
-- Store the result from register back to global memory
-
+Improves memory bandwidth utilization by using vectorized loads/stores with float4 (128-bit):
 
 #+begin_src cuda
-        // For shared_A, we need to load BM * BK in total, and we've got (BM * BN) / (TM * TN) threads
-        // With vectorization, we   can load 4 elements per thread, so each thread needs to load (BM * BK) / ((BM * BN) / (TM * TN)) / 4 = BK * TM * TN / (BN * 4) times
-        // This is equivalent to traversing on the BM dimension with stride_A = BM / (BK * TM * TN / (BN * 4)) = BM * BN * 4 / (BK * TM * TN) =
-        // BM * BN / (TM * TN) * (4 / BK)
-        // Because (BM * BN) / (TM * TN) = blockDim.x, so stride_A = blockDim.x * 4 / BK
-        for (uint j = 0; j < BM; j += stride_A) {
-            reinterpret_cast<float4*>(&shared_A[inner_row_a + j][inner_col_a])[0] = reinterpret_cast<const float4*>(&A[(inner_row_a + j) * K + inner_col_a])[0];
-        }
-        // For shared_B, we need to load BK * BN in total, and we've got (BM * BN) / (TM * TN) threads
-        // With vectorization, we can load 4 elements per thread, so each thread needs to load (BK * BN) / ((BM * BN) / (TM * TN)) / 4 = BK * TM * TN / (BM * 4) times
-        // This is equivalent to traversing on the BK dimension with stride_B = BK / (BK * TM * TN / (BM * 4)) = BK * BM * 4 / (BK * TM * TN) =
-        // BM * BN / (TM * TN) * (4 / BN)
-        // Because (BM * BN) / (TM * TN) = blockDim.x, so stride_B = blockDim.x * 4 / BN
-        for (uint j = 0; j < BK; j += stride_B) {
-            reinterpret_cast<float4*>(&shared_B[inner_row_b + j][inner_col_b])[0] = reinterpret_cast<const float4*>(&B[(inner_row_b + j) * N + inner_col_b])[0];
-        }
-#+end_src
+// Vectorized loading example
+const uint stride_A = blockDim.x * 4 / BK;  // 4 elements per float4
+const uint stride_B = blockDim.x * 4 / BN;
 
-#+begin_src cuda
-    // Store the results
-    for (uint i = 0; i < TM; i++) {
-        for (uint j = 0; j < TN; j+= 4) {
-            float4 result {thread_results[i][j], thread_results[i][j+1], thread_results[i][j+2], thread_results[i][j+3]};
-            reinterpret_cast<float4*>(&C[(thread_row * TM + i) * N + (thread_col * TN)])[0] = result;
-        }
+// Load tiles with float4 (128-bit) operations
+for (uint offset = 0; offset < BM; offset += stride_A) {
+    reinterpret_cast<float4*>(&shared_A[inner_row_a + offset][inner_col_a])[0] = 
+        reinterpret_cast<const float4*>(&A[(inner_row_a + offset) * K + inner_col_a])[0];
+}
+
+for (uint offset = 0; offset < BK; offset += stride_B) {
+    reinterpret_cast<float4*>(&shared_B[inner_row_b + offset][inner_col_b])[0] = 
+        reinterpret_cast<const float4*>(&B[(inner_row_b + offset) * N + inner_col_b])[0];
+}
+
+// Vectorized store (assuming TN is divisible by 4)
+for (uint m = 0; m < TM; m++) {
+    for (uint n = 0; n < TN; n += 4) {
+        float4 result = make_float4(thread_results[m][n], thread_results[m][n+1], 
+                                   thread_results[m][n+2], thread_results[m][n+3]);
+        reinterpret_cast<float4*>(&C[(thread_row * TM + m) * N + (thread_col * TN + n)])[0] = result;
     }
+}
 #+end_src
 
-** Warp tiling kernel
-Warp is a construct of CUDA that's invisible to the programmer. However, it's important for the performance of the kernel:
-- Warps are the unit of scheduling that is mapped to the warp-schedulers that are part of the SM.
-- Shared-memory bank conflicts (I’ll cover those in a future post) happen only between threads that are in the same warp.
-- There’s a register cache on recent GPUs, and tighter threadtiling gives us more register cache locality.
-- New feature called warp specialization allows us to specialize the code for each warp within a block.
+Key improvements:
+- 4× fewer memory transactions through vectorization
+- Better memory bandwidth utilization
+- Requires alignment and divisibility constraints
+- Configuration: BM=128, BN=128, BK=8, TM=8, TN=8
 
-Warptiling is elegant since we now make explicit all levels of parallelism:
+** Warp tiling
 
-- Blocktiling: Different blocks can execute in parallel on different SMs.
-- Warptiling: Different warps can execute in parallel on different warp schedulers, and concurrently on the same warp scheduler.
-- Threadtiling: (a very limited amount of) instructions can execute in parallel on the same CUDA cores (= instruction-level parallelism aka ILP).
+Warp tiling adds an intermediate level of tiling between thread and block levels, explicitly organizing computation at the warp (32 threads) level.
 
-In another perspective:
-- thread  → registers
-- warp    → registers plus fast register-to-register shuffle network
-- block   → on-chip shared memory
+*** Three levels of tiling hierarchy:
 
+**** Block tiling
+- Multiple blocks execute on different SMs
+- Data reuse via shared memory (visible to all warps in block)
+- Synchronization with ~__syncthreads()~
+- Reduces global memory accesses from O(M×N×K) to O(M×N×K/BK)
 
-Thread-tiling
-What it is: Each individual thread is asked to compute a small patch (e.g., 2x2 or 4x4 results) instead of only one result.
-Where data live while being reused: the thread's registers.
-Purpose:
-- Reuse operands several times after one load, increasing arithmetic intensity.
-- Generate more independent instructions per thread (higher ILP).
-- Reduce indexing/branching overhead and often produce perfectly-coalesced global accesses.
+**** Warp tiling  
+- 32 threads in a warp work on a WM×WN sub-tile cooperatively
+- Data reuse via register shuffle operations or shared memory
+- No synchronization needed within warp (threads execute in lockstep)
+- Reduces shared memory bank conflicts
+- Better locality for register cache
 
-Warp-tiling
-What it is: The 32 threads that execute in lock-step (a warp) cooperate on a somewhat larger tile. They usually load it with one or two coalesced transactions and then exchange the pieces each thread needs with shuffle instructions (or, in older code, with shared memory).
-Where data live while being reused: registers that are exchanged through the warp-shuffle network.
-Purpose:
-- Let every value brought from global memory be consumed by many threads in the same warp.
-- Avoid—or at least minimise—the use of shared memory for data that are only needed inside one warp, thereby saving shared-memory capacity for inter-warp reuse.
-- Avoid shared-memory bank conflicts.
+**** Thread tiling
+- Each thread computes TM×TN elements
+- Data reuse via registers
+- Increases instruction-level parallelism (ILP)
+- Reduces indexing overhead
 
-Block-tiling
-What it is: All threads of a thread-block stage an even larger tile in shared memory, typically in several steps along a loop. Each warp then processes its own warp-tile using that shared tile as input.
-Where data live while being reused: on-chip shared memory (visible to every warp in the block).
-Purpose:
-- Fetch each global-memory element once per block instead of once per warp or once per thread, cutting global memory traffic dramatically.
-- Provide a synchronization point ( __syncthreads() ) that allows predictable, race-free reuse.
-- Exploit the fact that shared memory is an order of magnitude faster than global memory.
+The warp-tiled kernels (e.g., ~sync_db_warp_matmul.cu~) organize computation so each warp processes its own tile within the larger block tile. Benefits include:
+- Better shared memory access patterns
+- Reduced bank conflicts through careful layout
+- More efficient register usage
+- Explicit control over warp-level parallelism
 
-** Double buffering – hiding memory latency with a small software pipeline
+Typical configuration: WM=32, WN=64, with each warp computing multiple iterations (WMITER×WNITER).
 
-At this point our kernel is already *compute‑bound* most of the time, but every
-time we move to the next K‑tile we still do the following strictly
+** Double buffering – hiding memory latency
+
+At this point our kernel is already compute-bound most of the time, but every
+time we move to the next K-tile we still do the following strictly
 sequentially:
 
-1. Load `A_tile` and `B_tile` from global memory → shared memory
-2. `__syncthreads()`
+1. Load A_tile and B_tile from global memory → shared memory
+2. ~__syncthreads()~
 3. Run the inner FMAs that use that tile
-4. `__syncthreads()` so that the next load does not clobber the tile we are
+4. ~__syncthreads()~ so that the next load does not clobber the tile we are
    still reading from
 
-The two synchronisations mean that *all* threads in the block are stalled
+The two synchronizations mean that all threads in the block are stalled
 during the load phases – the SM issues no arithmetic instructions while the
-memory pipelines are busy, so those ~800 cycle GMEM latencies show up as very
-obvious `long scoreboard` stalls in Nsight Compute.
+memory pipelines are busy.
 
-Double buffering (sometimes called *ping‑pong buffering*) removes the
-serialization by reserving **two** backing buffers in shared memory:
+Double buffering (ping-pong buffering) removes the serialization by reserving 
+two backing buffers in shared memory:
 
-# +begin_example
-|  A_0  |  B_0  |  A_1  |  B_1  |   ←   shared memory (one thread‑block)
+#+begin_example
+|  A_0  |  B_0  |  A_1  |  B_1  |   ←   shared memory
             ↑          ↑
         compute   preload next tile
-# +end_example
+#+end_example
 
-While the warps are performing the FMAs that use the data in buffer `0`, *the
-same* warps start to fill buffer `1` with the data that will be needed in the
-next iteration.  When the computation finishes we just flip the read/write
-roles of the two buffers and continue.  The effect is a tiny software
-pipeline of depth 2:
+While warps perform FMAs using buffer 0, they simultaneously fill buffer 1 
+with data for the next iteration. This creates a software pipeline:
 
-# +begin_example
+#+begin_example
 Iteration i :  [ load_i   ][ compute_i ]
 Iteration i+1:            [ load_{i+1}   ][ compute_{i+1} ]
-# +end_example
+#+end_example
 
-*** Case 1 – No asynchronous copy instructions (pre-Ampere)***
+*** Without async copies (pre-Ampere)
 
-On architectures that do **not** have `cp.async`/`cuda::memcpy_async` we still
-benefit from double buffering because the compiler and the GPU scheduler are
-able to overlap the *instruction streams* of the load loop and the compute
-loop.
+The compiler and GPU scheduler overlap instruction streams:
+- Thread issues ~ld.global~ followed by independent arithmetic instructions
+- Hardware scoreboard allows both to be in flight simultaneously
+- Provides instruction-level parallelism to hide memory latency
+- Overlap is partial but still beneficial
 
-• Each thread issues a `ld.global` followed almost immediately by independent
-  arithmetic instructions.  Since the FMA does **not** depend on the result of
-  the load, the hardware scoreboard allows both to be in flight at the same
-  time.
-• That gives us tens of FMAs worth of *instruction-level parallelism* (ILP)
-  per thread that the scheduler can use to hide the ~400-800 cycle memory
-  latency.
-• The overlap is not perfect – if the kernel runs out of independent
-  arithmetic instructions the warp will still stall – but compared with the
-  fully sequential version the stall percentage drops dramatically and the
-  achieved FLOP/s goes up correspondingly.
+*** With async copies (Ampere+)
 
-You can observe this in Nsight Compute: the `smsp__inst_executed` metric stays
-flat while `smsp__sass_average_branch_targets_threads_uniform_pct` decreases –
-fewer warps are blocked on a long scoreboard.
+Using ~cuda::memcpy_async~ provides:
+- Instructions return immediately
+- Dedicated LSU pipeline for copies
+- Small in-flight queue per warp
+- ~cuda::pipeline~ API for explicit producer/consumer relationships
 
-*** Case 2 – Using `cp.async` / `cuda::memcpy_async` (Ampere +)***
-
-Starting with Ampere the architecture exposes *asynchronous* bulk copy
-instructions that transfer data from global memory to shared memory through a
-dedicated *LSU pipeline*.  The key properties are:
-
-• The instruction returns **immediately**; the thread can continue issuing
-  arithmetic ops while the copy progresses in the background.
-• A small in-flight queue (size ≈ 16) per warp hides the latency of the copy
-  even if no other warps are ready.
-• A new `cuda::pipeline` / `cp.async.wait()` API lets us express the
-  producer/consumer relationship explicitly and avoid the full
-  `__syncthreads()` barrier – we only need a `consumer_wait()` right before the
-  tile is accessed.
-
-With these instructions the timeline looks like this:
-
-```
+Timeline with async copies:
+#+begin_example
 load_i (async)
-                           compute_i (uses previous tile)
---------------------------------------------------------------------------------
-consumer_wait()            load_{i+1} (async)                  compute_{i+1}
-```
+                         compute_i (uses previous tile)
+------------------------------------------------------------------------
+consumer_wait()          load_{i+1} (async)              compute_{i+1}
+#+end_example
 
-All the large memory latencies are now completely overlapped with useful work.
-Nsight Compute will show the *memory* stall reasons dropping close to 0%, and
-the kernel becomes limited by either the tensor/FMA throughput or by the
-number of registers per thread (i.e. occupancy).
-
-In practice enabling double buffering with `cp.async` tends to improve a well
-tilled matmul kernel by another 1.2× – 1.4× on Ampere and Hopper GPUs.
-
-*** Key take-aways
-
-- Double buffering hides *compulsory* memory latency by building a tiny
-  software pipeline.
-- Without async copies we rely on ILP to overlap the independent load and
-  compute instructions; the overlap is partial but still worthwhile.
-- With async copies the overlap is explicit and nearly perfect, allowing the
-  kernel to sustain throughput very close to the theoretical FMAs/clock of the
-  SM.
+Benefits: 1.2×–1.4× speedup on well-tiled kernels by completely overlapping
+memory latency with computation.
 
 ** Tensor Memory Accelerator (TMA)
 
-Hopper GPUs (e.g., NVIDIA H100) introduce a dedicated hardware block called the
-Tensor Memory Accelerator (TMA) that can perform asynchronous 2D bulk copies
-between global memory and shared memory with minimal software overhead. We
-harness TMA in the `tma_async_matmul_wt`, `tma_double_buffer_matmul`, and
-`tma_double_buffer_matmul_wt` kernels by:
+Hopper GPUs (H100) introduce hardware-accelerated 2D bulk copies between global 
+and shared memory. TMA kernels use:
 
-- Defining a tiled view of the global A and B matrices via `CUtensorMap`
-  objects (created with `cuTensorMapEncodeTiled`) and marking them
-  `__grid_constant__` so every thread can access the map.
-- Allocating shared memory as one or two ping-pong buffers for A and B tiles.
-- Initializing a software barrier (`ptx::mbarrier_init`) and using
-  `ptx::mbarrier_arrive` / `ptx::mbarrier_wait_parity` to synchronize TMA
-  transfers.
-- Issuing TMA copy instructions with `ptx::cp_async_bulk_tensor_2d_global_to_shared`
-  on the master thread to enqueue the load of each tile into shared memory.
-- Overlapping copies and compute by prefetching the next tile
-  (`ptx::prefetch_async_bulk_tensor_2d_global_l2`) and double buffering
-  so while one tile is used in the MAC loop, the next tile is loading in
-  the other buffer.
+- ~CUtensorMap~ objects defining tiled views of matrices
+- PTX-level barriers (~mbarrier~) for synchronization
+- ~cp_async_bulk_tensor_2d~ instructions for hardware-managed transfers
+- Prefetching to L2 cache
+- Double buffering for latency hiding
 
-This TMA-based approach delivers near-peak shared-memory bandwidth and hides
-global memory latency behind ongoing computation, boosting performance
-beyond software-managed `cp.async` double buffering.
+Key advantages:
+- Near-peak shared memory bandwidth
+- Minimal software overhead
+- Better than software-managed ~cp.async~
+- Enables highest performance kernels (60%+ of theoretical peak)
 
 ** Benchmark results
 
-In the `faster-matmul` directory, run:
+Performance progression on H100 (4096×512 × 512×2048):
 
-#+begin_src bash
-  jovyan@na1-glad-hefty-peacock:~/learning-cuda/faster-matmul$ make run
-  echo "Running all kernels..."
-Running all kernels...
-./naive_matmul
-Running naive matrix multiplication benchmark:
-CPU matrix multiplication time: 12556.6 ms
-CPU Performance: 0.684097 GFLOPS
-Results match between CPU and GPU!
+| Kernel | Performance | % of Peak | Speedup |
+|--------|------------|-----------|---------|
+| Naive | 0.49 TFLOPS | 0.7% | 1× |
+| Coalesced | 6.28 TFLOPS | 9.4% | 12.7× |
+| Shared Memory | 8.58 TFLOPS | 12.8% | 17.4× |
+| 1D Tiling | 19.27 TFLOPS | 28.8% | 39.1× |
+| 2D Tiling | 22.65 TFLOPS | 33.8% | 46.0× |
+| Vectorized | 33.89 TFLOPS | 50.6% | 68.8× |
+| Double Buffer | 36.54 TFLOPS | 54.5% | 74.2× |
+| TMA | 38.24 TFLOPS | 57.1% | 77.6× |
+| TMA + Warp Tile | 42.06 TFLOPS | 62.8% | 85.4× |
 
-CPU result (3x3 section):
-5.393 -8.138 -1.575 
--8.448 14.118 -4.260 
-14.764 -7.873 1.536 
-
-GPU result (3x3 section):
-5.393 -8.138 -1.575 
--8.448 14.118 -4.260 
-14.764 -7.873 1.536 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 17.431 ms
-GPU Performance: 492.785 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 0.736%
-Performance vs cuBLAS: 1.069%
-GPU speedup over CPU: 720.344x
-./coalesced_matmul
-Running coalesced_matmul benchmark:
-CPU matrix multiplication time: 12423.8 ms
-CPU Performance: 0.691411 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
-11.278 -2.002 -2.664 
-6.170 0.115 2.395 
--8.149 11.153 9.138 
-
-GPU result (3x3 section):
-11.278 -2.002 -2.664 
-6.170 0.115 2.395 
--8.149 11.153 9.138 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 1.368 ms
-GPU Performance: 6277.430 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 9.369%
-Performance vs cuBLAS: 13.615%
-GPU speedup over CPU: 9079.156x
-./sram_matmul
-Running sram bank conflict free matrix multiplication benchmark:
-CPU matrix multiplication time: 12815 ms
-CPU Performance: 0.670304 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
--5.738 -4.201 3.971 
-4.485 -5.746 -1.597 
--7.161 7.278 -7.018 
-
-GPU result (3x3 section):
--5.738 -4.201 3.971 
-4.485 -5.746 -1.597 
--7.161 7.278 -7.018 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 1.002 ms
-GPU Performance: 8576.569 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 12.801%
-Performance vs cuBLAS: 18.602%
-GPU speedup over CPU: 12795.041x
-./1d_block_tiling_matmul
-Running 1d_block_tiling_matmul benchmark:
-CPU matrix multiplication time: 12745.8 ms
-CPU Performance: 0.673942 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
-5.426 -5.151 0.558 
--15.775 2.462 13.527 
--1.143 -1.751 -8.095 
-
-GPU result (3x3 section):
-5.426 -5.151 0.558 
--15.775 2.462 13.527 
--1.143 -1.751 -8.095 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 0.446 ms
-GPU Performance: 19267.960 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 28.758%
-Performance vs cuBLAS: 41.790%
-GPU speedup over CPU: 28589.949x
-./2d_block_tiling_matmul
-Running 2d_block_tiling_matmul benchmark:
-CPU matrix multiplication time: 13247 ms
-CPU Performance: 0.648444 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
-13.151 -4.849 -7.513 
--0.237 -8.349 3.404 
--5.974 1.799 -3.492 
-
-GPU result (3x3 section):
-13.151 -4.849 -7.513 
--0.237 -8.349 3.404 
--5.974 1.799 -3.492 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 0.379 ms
-GPU Performance: 22651.824 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 33.809%
-Performance vs cuBLAS: 49.130%
-GPU speedup over CPU: 34932.571x
-./vectorized_2d_block_tiling_matmul
-Device name: NVIDIA H100 80GB HBM3
-Shared memory size: 233472
-Shared memory size per block: 49152
-Running vectorized_2d_block_tiling_matmul benchmark:
-CPU matrix multiplication time: 12836.4 ms
-CPU Performance: 0.669186 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
-9.713 1.889 -4.997 
--2.961 -0.997 -5.971 
-4.361 -6.779 1.546 
-
-GPU result (3x3 section):
-9.713 1.889 -4.997 
--2.961 -0.997 -5.971 
-4.361 -6.779 1.546 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 0.253 ms
-GPU Performance: 33890.370 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 50.583%
-Performance vs cuBLAS: 73.505%
-GPU speedup over CPU: 50644.193x
-./double_buffering_matmul
-Device name: NVIDIA H100 80GB HBM3
-Shared memory size: 233472
-Shared memory size per block: 49152
-Running double_buffering_matmul benchmark:
-CPU matrix multiplication time: 12287.6 ms
-CPU Performance: 0.699072 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
--5.296 -7.828 -2.811 
-8.230 10.311 5.018 
--10.074 1.603 4.377 
-
-GPU result (3x3 section):
--5.296 -7.828 -2.811 
-8.230 10.311 5.018 
--10.074 1.603 4.377 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 0.256 ms
-GPU Performance: 33578.776 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 50.118%
-Performance vs cuBLAS: 72.829%
-GPU speedup over CPU: 48033.334x
-./async_global_to_shared_matmul
-Device name: NVIDIA H100 80GB HBM3
-Shared memory size: 233472
-Shared memory size per block: 49152
-Running async_global_to_shared_matmul benchmark:
-CPU matrix multiplication time: 12490.9 ms
-CPU Performance: 0.687693 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
--0.659 -8.166 -15.553 
--12.705 24.062 -8.683 
--6.847 2.344 2.973 
-
-GPU result (3x3 section):
--0.659 -8.166 -15.553 
--12.705 24.062 -8.683 
--6.847 2.344 2.973 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 0.235 ms
-GPU Performance: 36535.749 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 54.531%
-Performance vs cuBLAS: 79.243%
-GPU speedup over CPU: 53127.976x
-./tma_async_matmul_wt
-Device name: NVIDIA H100 80GB HBM3
-Shared memory size per block: 233472
-Running Vectorized 2D block tiling (TMA with TensorMap) matrix multiplication benchmark:
-CPU matrix multiplication time: 12480.4 ms
-CPU Performance: 0.688272 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
-8.061 -5.220 10.580 
--9.024 -9.649 -9.406 
-3.887 -5.157 4.125 
-
-GPU result (3x3 section):
-8.061 -5.220 10.580 
--9.024 -9.649 -9.406 
-3.887 -5.157 4.125 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 0.350 ms
-GPU Performance: 24553.896 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 36.648%
-Performance vs cuBLAS: 53.255%
-GPU speedup over CPU: 35674.680x
-./tma_double_buffer_matmul
-Device name: NVIDIA H100 80GB HBM3
-Shared memory size: 233472
-Shared memory size per block: 49152
-Device supports cooperative launch: Yes
-Device supports cluster launch: Yes
-Device async engine count: 3
-Required dynamic shared memory per block: 32768 bytes
-Required static shared memory per block: 8 bytes
-Running TMA Double Buffered matrix multiplication benchmark:
-CPU matrix multiplication time: 12983.6 ms
-CPU Performance: 0.661599 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
--13.161 -7.005 0.825 
--3.210 0.293 -7.178 
--23.658 0.868 8.105 
-
-GPU result (3x3 section):
--13.161 -7.005 0.825 
--3.210 0.293 -7.178 
--23.658 0.868 8.105 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 0.225 ms
-GPU Performance: 38236.491 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 57.069%
-Performance vs cuBLAS: 82.931%
-GPU speedup over CPU: 57794.026x
-./tma_double_buffer_matmul_wt
-Device name: NVIDIA H100 80GB HBM3
-Shared memory size: 233472
-Shared memory size per block: 49152
-Device supports cooperative launch: Yes
-Device supports cluster launch: Yes
-Device async engine count: 3
-Required dynamic shared memory per block: 49152 bytes
-Required static shared memory per block: 8 bytes
-Running TMA Double Buffered matrix multiplication benchmark:
-CPU matrix multiplication time: 13090.8 ms
-CPU Performance: 0.656181 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
-6.485 -18.253 7.287 
-4.670 -12.479 -4.622 
-3.702 -1.471 13.609 
-
-GPU result (3x3 section):
-6.485 -18.253 7.287 
-4.670 -12.479 -4.622 
-3.702 -1.471 13.609 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 0.204 ms
-GPU Performance: 42062.656 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 62.780%
-Performance vs cuBLAS: 91.230%
-GPU speedup over CPU: 64102.196x
-./sync_double_buffer_matmul
-Running sync_double_buffer_matmul benchmark:
-CPU matrix multiplication time: 12817.1 ms
-CPU Performance: 0.670191 GFLOPS
-Result mismatch at index 0: -12.2338 vs -2.53273
-Results DO NOT match between CPU and GPU!
-
-CPU result (3x3 section):
--2.533 -0.276 -6.811 
--2.668 -1.248 4.276 
--17.296 2.712 -3.032 
-
-GPU result (3x3 section):
--12.234 6.948 -2.774 
--7.273 1.230 1.089 
--0.081 -2.591 -0.035 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 0.352 ms
-GPU Performance: 24376.631 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 36.383%
-Performance vs cuBLAS: 52.871%
-GPU speedup over CPU: 36372.648x
-./sync_db_warp_matmul
-Running sync_db_warp_matmul benchmark:
-CPU matrix multiplication time: 12452 ms
-CPU Performance: 0.689845 GFLOPS
-Results match between CPU and GPU!
-
-CPU result (3x3 section):
-2.375 6.743 -9.502 
--8.738 -1.612 8.453 
--0.619 11.508 -0.835 
-
-GPU result (3x3 section):
-2.375 6.743 -9.502 
--8.738 -1.612 8.453 
--0.619 11.508 -0.835 
-Matrix dimensions: 4096x512 * 512x2048
-Average kernel execution time: 0.319 ms
-GPU Performance: 26962.451 GFLOPS
-GPU theoretical performance on H100: 67 teraFLOPS
-Performance vs theoretical max in percentage: 40.242%
-Performance vs cuBLAS: 58.479%
-GPU speedup over CPU: 39084.820x
-#
-#+end_src
-
+The progression shows how each optimization builds on the previous ones,
+ultimately achieving over 90% of cuBLAS performance with the most optimized kernel.

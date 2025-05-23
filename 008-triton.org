@@ -1,0 +1,98 @@
+* Triton
+** Design
+| Features          | CUDA                                  | Triton                                        |
+|-------------------+---------------------------------------+-----------------------------------------------|
+| Primary Language  | C++                                   | Python                                        |
+| Abstraction level | Low                                   | High                                          |
+| Parallelism Unit  | Grids of Blocks of Threads (explicit) | Program Instances operating on Blocks of Data |
+| Thread Management | Manual (via ~threadIdx~, ~blockIdx~)  | Largely abstracted by compiler                |
+| Memory management | Manual (via ~cudaMalloc~, ~cudaFree~) | Largely automated by compiler                 |
+| Synchronization   | Explicit via ~__syncthreads__~ or PTX | Implicit within program instances             |
+| Operations        | Typically scalar at thread level      | Vectorized / Block-level operations           |
+| Learning Curve    | Steeper                               | Gentler                                       |
+| Control           | Maximum, with support of inline PTX   | Higher-level, compiler-repliant               |
+| Productivity      | Lower for complex kernels             | Higher                                        |
+
+** Writing Triton code
+We cannot just skip the level of learning for CUDA and go straight to Triton because:
+
+1. Triton is an abstraction on top of CUDA
+2. You may want to optimize the kernel further in CUDA
+3. You need to understand the paradigm used in CUDA and relay topics to understand how to build an efficient triton kernel.
+
+** First Trident kernel: vector addition
+#+begin_src python
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def vector_add(
+            x_ptr: tl.tensor,
+            y_ptr: tl.tensor,
+            output_ptr: tl.tensor,
+            n_elements: int,
+            BLOCK_SIZE: tl.constexpr
+        ):
+    # There are multiple 'programs' processing different data. We identify which program
+    # we are here:
+    pid = tl.program_id(axis=0)  # We use a 1D launch grid so axis is 0.
+
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE) # we compute offsets for an entire block with tl.arange
+    mask = offsets < n_elements # in CUDA we would have used a if statement
+
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    output = x + y
+    tl.store(output_ptr + offsets, output, mask=mask)
+#+end_src
+All operations in Triton kernels are vectorized (loading data, storing data, computations, computing masks).
+
+This is roughly equivalent to:
+#+begin_src cuda
+__global__ void d_vector_add(float* d_vec1, float* d_vec2, float* d_result, int len) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (i < len) {
+    d_result[i] = d_vec1[i] + d_vec2[i];
+  }
+}
+#+end_src
+** JIT Compiled Kernel
+Triton kernels are JIT compiled.
+They are lazy by default, and compilation only happens during the first run.
+
+Below is the compilation process for Triton:
+[[file:assets/triton-compilation-stages.png]]
+** Triton vs ~torch.compile~:
+*** ~torch.compile~:
+**** Optimize PyTorch code but not the underlying kernel
+**** Changes your code to make the best use of existing GPU kernels
+**** Sometimes writes simple new kernels using Triton
+*** Triton
+**** Allows writing custom kernels for performance-critical parts.
+**** Offer more control over kernel behaviors
+** How to develop Triton kernel
+*** Simulator mode
+We can set ~TRITON_INTERPRET='1'~ to enable simulator mode, running Triton kernel on CPU.
+This will help debugging different kernel behaviors
+
+** Softmax kernel
+Softmax is an operation that is often used as the last operation in a layer
+to normalize output into distributions that is ranging from 0 to 1 and sum up to 1.
+
+Let's first implement softmax kernel in Triton
+#+begin_src python
+@triton.jit
+def softmax_kernel(x_ptr, output_ptr, x_num_rows: tl.constexpr, x_num_columns: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0) # pid will be the column index, we parallelize across row_index and compute an entire column
+    offsets = tl.arange(0, BLOCK_SIZE) * x_num_columns + pid
+    mask = offsets < (x_num_rows * x_num_columns)
+    x = tl.load(x_ptr + offsets, mask=mask, other=-float('inf'))
+    x_exp = tl.exp(x)
+    denom = tl.sum(x_exp, axis=0)
+    y = x_exp / denom
+
+    tl.store(output_ptr + offsets, y, mask=mask)
+#+end_src
