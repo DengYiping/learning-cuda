@@ -1,0 +1,59 @@
+* PyTorch Extensions
+First, we need to include a build process to bind our C++ code to pytorch.
+
+In the ~setup.py~:
+#+begin_src python
+from setuptools import setup
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+setup(
+    name="safe_softmax_cuda",
+    ext_modules=[
+        CUDAExtension("safe_softmax_cuda", [
+            "safe_softmax_cuda.cu",
+        ]),
+    ],
+    cmdclass={
+        "build_ext": BuildExtension
+    })
+#+end_src
+
+And in the ~safe_softmax_cuda.cu~ file:
+#+begin_src cuda
+#include <torch/extension.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+
+template <typename scalar_t>
+__global__ void safe_softmax_kernel(
+    const scalar_t* __restrict__ x,
+    scalar_t* __restrict__ output,
+    size_t size) {
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        scalar_t val = x[idx];
+        output[idx] = val * val + val + 1; // x^2 + x + 1
+    }
+}
+
+torch::Tensor safe_softmax_cuda(torch::Tensor x) {
+    auto output = torch::empty_like(x);
+    int threads = 1024;
+    int blocks = (x.numel() + threads - 1) / threads;
+
+    AT_DISPATCH_FLOATING_TYPES(x.type(), "safe_softmax_cuda", ([&] {
+        safe_softmax_kernel<scalar_t><<<blocks, threads>>>(
+            x.data_ptr<scalar_t>(),
+            output.data_ptr<scalar_t>(),
+            x.numel()
+        );
+    }));
+
+    return output;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("safe_softmax", &polynomial_activation_cuda, "Safe softmax (CUDA)");
+}
+#+end_src

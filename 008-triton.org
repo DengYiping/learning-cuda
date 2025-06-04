@@ -96,3 +96,34 @@ def softmax_kernel(x_ptr, output_ptr, x_num_rows: tl.constexpr, x_num_columns: t
 
     tl.store(output_ptr + offsets, y, mask=mask)
 #+end_src
+
+Notice that this kernels can leads to overflow problem because we directly run ~tl.exp(x)~ against the input.
+
+We need to account for overflow issues for floating point number.
+
+** Safe softmax
+#+begin_src python
+@triton.jit
+def softmax_kernel(x_ptr, y_ptr, x_num_rows, x_num_cols, BLOCK_SIZE: tl.constexpr):
+    x_col = tl.program_id(0) # parallelize on the grid for columns
+    tid = tl.arange(0, BLOCK_SIZE)
+    x_offsets = tid * x_num_cols + x_col
+    mask = tid < x_num_rows
+    mask = mask & (x_col < x_num_cols)
+    x = tl.load(x_ptr + x_offsets, mask=mask)
+    x_max = tl.max(x)
+    x = x - x_max
+    x_exp = tl.exp(x)
+    x_exp_sum = tl.sum(x_exp)
+    y = x_exp / x_exp_sum
+    tl.store(y_ptr + x_offsets, y, mask=mask)
+
+def softmax_triton(x: torch.Tensor) -> torch.Tensor:
+    y = torch.empty_like(x)
+    block_size = triton.next_power_of_2(x.shape[0])
+
+    grid = lambda meta: (x.shape[1],)
+    softmax_kernel[grid](x, y, x.shape[0], x.shape[1], BLOCK_SIZE = block_size)
+    return y
+#+end_src
+
