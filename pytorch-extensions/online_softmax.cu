@@ -48,7 +48,7 @@ __global__ void online_softmax_kernel(
   int idx = blockIdx.x * input_row_stride + threadIdx.x * input_col_stride;
 
   // Init sram
-  scalar_t val = -cuda::std::numeric_limits<scalar_t>::infinity();
+  scalar_t val = cuda::std::numeric_limits<scalar_t>::lowest();
   scalar_t agg = scalar_t(0);
 
   if (threadIdx.x < N) {
