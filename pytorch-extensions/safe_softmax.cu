@@ -2,7 +2,9 @@
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cuda/std/limits>
 #include <torch/extension.h>
+
 
 #include "safe_softmax.hpp"
 
@@ -25,7 +27,7 @@ __global__ void safe_softmax_kernel(
   __shared__ scalar_t sdata[1024];
 
   // 1) compute row-max
-  scalar_t val = -std::numeric_limits<scalar_t>::infinity();
+  scalar_t val = -cuda::std::numeric_limits<scalar_t>::infinity();
   if (col < N) {
     val = x[row * input_row_stride + col * input_col_stride];
   }

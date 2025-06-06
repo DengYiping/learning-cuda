@@ -2,7 +2,8 @@
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
-#include <cub/cub.cuh>
+#include <cuda/std/limits>
+// #include <cub/cub.cuh>
 #include <cmath>
 #include <algorithm>
 #include <torch/extension.h>
@@ -41,6 +42,43 @@ __global__ void online_softmax_kernel(
   int M, int N
 ) {
   // This is the kernel to implement
+  __shared__ scalar_t sram_m[BLOCK_SIZE];
+  __shared__ scalar_t sram_d[BLOCK_SIZE];
+
+  int idx = blockIdx.x * input_row_stride + threadIdx.x * input_col_stride;
+
+  // Init sram
+  scalar_t val = -cuda::std::numeric_limits<scalar_t>::infinity();
+  scalar_t agg = scalar_t(0);
+
+  if (threadIdx.x < N) {
+    val = x[idx];
+    agg = scalar_t(1);
+  }
+
+  sram_m[threadIdx.x] = val;
+  sram_d[threadIdx.x] = agg;
+  __syncthreads();
+
+  // parallel reduction once
+  for (int stride = blockDim.x / 2; stride > 0; stride >>=1) {
+    if (threadIdx.x < stride) {
+      scalar_t left = sram_m[threadIdx.x];
+      scalar_t right = sram_m[threadIdx.x + stride];
+      scalar_t m = fmaxf(left, right);
+      scalar_t d = sram_d[threadIdx.x] * expf(left - m) + sram_d[threadIdx.x + stride] * expf(right - m);
+      sram_m[threadIdx.x] = m;
+      sram_d[threadIdx.x] = d;
+    }
+    __syncthreads();
+  }
+
+  // calculate value
+  if (threadIdx.x < N) {
+    scalar_t final_val = expf(val - sram_m[0]) / sram_d[0];
+    int output_idx = blockIdx.x * output_row_stride + threadIdx.x * output_col_stride;
+    output[output_idx] = final_val;
+  }
 }
 
 torch::Tensor online_softmax(torch::Tensor x) {
