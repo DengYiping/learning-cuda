@@ -34,6 +34,7 @@ unsigned int next_power_of_2_min_32(unsigned int n) {
 }
 
 template <typename scalar_t, int BLOCK_SIZE>
+__launch_bounds__(BLOCK_SIZE)
 __global__ void online_softmax_kernel(
   const scalar_t* __restrict__ x,
   scalar_t* __restrict__ output,

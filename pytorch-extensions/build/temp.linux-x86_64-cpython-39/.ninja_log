@@ -1,4 +1,0 @@
-# ninja log v5
-1	14497	1748642385077993536	/home/jovyan/learning-cuda/pytorch-extensions/build/temp.linux-x86_64-cpython-39/binding.o	8251748697caad4d
-1	39767	1748642410338493970	/home/jovyan/learning-cuda/pytorch-extensions/build/temp.linux-x86_64-cpython-39/safe_softmax.o	68a467d01237caad
-1	41749	1748642412318533196	/home/jovyan/learning-cuda/pytorch-extensions/build/temp.linux-x86_64-cpython-39/online_softmax.o	70e720f6eb0ef915
